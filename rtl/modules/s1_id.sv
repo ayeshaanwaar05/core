@@ -70,9 +70,9 @@ module s1_id
   output logic                  fetch_rsp_ready_o,
   input  fetch_rsp_t            fetch_rsp_i,
 
-  // Register file read ports
-  output logic [REG_ADDR_W-1:0] rs1_addr_o,
-  output logic [REG_ADDR_W-1:0] rs2_addr_o,
+  // Register file read data for fetch_rsp_i's rs1/rs2.  The addresses are
+  // not driven from here: the file's read is registered, so s1_fetch presents
+  // them a cycle early (nxt_rs*_addr_o).
   input  logic [XLEN-1:0]       rs1_data_i,
   input  logic [XLEN-1:0]       rs2_data_i,
 
@@ -116,11 +116,6 @@ module s1_id
   logic kill, out_free;
   assign kill     = flush_i || ex_redirect_valid_i;
   assign out_free = !ex_valid_q || ex_ready_i;
-
-  // A CSR instruction puts uimm[4:0] in the rs1 field, so it must not be read
-  // as a register -- `rs1_re` is already clear there.
-  assign rs1_addr_o = dec.rs1;
-  assign rs2_addr_o = dec.rs2;
 
   // ---------------------------------------------------------------------------
   // Hazards

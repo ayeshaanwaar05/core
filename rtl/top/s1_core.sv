@@ -152,8 +152,10 @@ module s1_core
   logic        mem_wb_valid;
   mem_wb_t     mem_wb;
 
+  localparam int unsigned RF_N_READ = 2;   // rs1, rs2
   logic [REG_ADDR_W-1:0] rf_rs1_addr, rf_rs2_addr;
-  logic [XLEN-1:0]       rf_rs1_data, rf_rs2_data;
+  logic [REG_ADDR_W-1:0] rf_raddr [RF_N_READ];
+  logic [XLEN-1:0]       rf_rdata [RF_N_READ];
   rf_wr_t                rf_wr;
 
   logic                  wb_flush, wb_redirect_valid, wb_busy;
@@ -212,7 +214,10 @@ module s1_core
 
     .fetch_rsp_valid_o       (fetch_rsp_valid),
     .fetch_rsp_ready_i       (fetch_rsp_ready),
-    .fetch_rsp_o             (fetch_rsp)
+    .fetch_rsp_o             (fetch_rsp),
+
+    .nxt_rs1_addr_o          (rf_rs1_addr),
+    .nxt_rs2_addr_o          (rf_rs2_addr)
   );
 
   // ===========================================================================
@@ -237,10 +242,8 @@ module s1_core
     .fetch_rsp_ready_o   (fetch_rsp_ready),
     .fetch_rsp_i         (fetch_rsp),
 
-    .rs1_addr_o          (rf_rs1_addr),
-    .rs2_addr_o          (rf_rs2_addr),
-    .rs1_data_i          (rf_rs1_data),
-    .rs2_data_i          (rf_rs2_data),
+    .rs1_data_i          (rf_rdata[0]),
+    .rs2_data_i          (rf_rdata[1]),
 
     .exmem_valid_i       (ex_mem_valid),
     .exmem_i             (ex_mem),
@@ -255,14 +258,22 @@ module s1_core
     .perf_hazard_stall_o (perf_hazard_stall)
   );
 
-  s1_regfile u_regfile (
-    .clk_i      (clk_i),
-    .rst_ni     (rst_ni),
-    .rs1_addr_i (rf_rs1_addr),
-    .rs2_addr_i (rf_rs2_addr),
-    .rs1_data_o (rf_rs1_data),
-    .rs2_data_o (rf_rs2_data),
-    .wr_i       (rf_wr)
+  // The read is registered (meds_s1_sram, R-C5): fetch presents the addresses
+  // of the instruction about to enter ID, and the data is there with it.  The
+  // array is assigned whole, not by element -- see the Makefile on Verilator
+  // 5.020 and unpacked-array input ports.
+  assign rf_raddr = '{rf_rs1_addr, rf_rs2_addr};
+
+  s1_regfile #(
+    .N_READ (RF_N_READ)
+  ) u_regfile (
+    .clk_i   (clk_i),
+    .rst_ni  (rst_ni),
+    .raddr_i (rf_raddr),
+    .rdata_o (rf_rdata),
+    .we_i    (rf_wr.we),
+    .waddr_i (rf_wr.addr),
+    .wdata_i (rf_wr.data)
   );
 
   // ===========================================================================

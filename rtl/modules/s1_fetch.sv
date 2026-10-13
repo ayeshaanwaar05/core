@@ -42,7 +42,14 @@ module s1_fetch
   // To ID
   output logic            fetch_rsp_valid_o,
   input  logic            fetch_rsp_ready_i,
-  output fetch_rsp_t      fetch_rsp_o
+  output fetch_rsp_t      fetch_rsp_o,
+
+  // Register-file read addresses, one cycle ahead of fetch_rsp_o: the rs1/rs2
+  // fields of the instruction ID will hold in the NEXT cycle.  The register
+  // file reads through meds_s1_sram, which answers a cycle after the address
+  // (R-C5), so the read has to start at the IF/ID boundary.
+  output logic [REG_ADDR_W-1:0] nxt_rs1_addr_o,
+  output logic [REG_ADDR_W-1:0] nxt_rs2_addr_o
 );
 
   localparam int unsigned WORD_BYTES = ILEN / 8;
@@ -341,6 +348,14 @@ module s1_fetch
 
   assign fetch_rsp_valid_o = fetch_rsp_valid_q;
   assign fetch_rsp_o       = fetch_rsp_q;
+
+  // What the IF/ID register holds after this edge: the instruction being
+  // loaded, else the one already there (ID is stalled on it, and the read is
+  // repeated so the data keeps tracking writes).  A kill needs no case of its
+  // own -- it leaves the register invalid, so the address is never used.
+  // Fields are taken from the expanded encoding, so RVC is already handled.
+  assign nxt_rs1_addr_o = load ? ins.instr[19:15] : fetch_rsp_q.instr[19:15];
+  assign nxt_rs2_addr_o = load ? ins.instr[24:20] : fetch_rsp_q.instr[24:20];
 
   // id: one outstanding request.  errcode: encoding undefined in I2.
   logic unused_inputs;

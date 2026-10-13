@@ -1,72 +1,118 @@
-// =============================================================================
 // Copyright 2026 Maktab-e-Digital Systems Lahore.
 // Licensed under the Apache License, Version 2.0, see LICENSE file for details.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Author(s)    : integration (Oct,2026)
-// Modified By  :
+// =============================================================================
+// s1_regfile : integer register file                              [WIP -- T-02]
 //
-// s1_regfile   : architectural integer register file               [COMPLETE]
-// Description  :
-// 31x XLEN registers, two read ports, one write port.  x0 is not storage: it
-// reads zero and a write to it is dropped.
+// 2**REG_ADDR_W registers of XLEN bits; x0 reads as zero.  N_READ read ports
+// with a one-cycle registered read, and one write port.  All storage is
+// meds_s1_sram (R-C5) and is not reset.
 //
-// The write port is driven by WB, which is the commit point: nothing writes
-// here speculatively, so a flush does not touch this file and there is no
-// state to roll back.
-//
-// Read-during-write returns the new value, and the 5-stage core depends on it.
-// WB commits an instruction in the same cycle ID may be reading its
-// destination, and ID's hazard check deliberately does not look at WB -- it
-// relies on this bypass instead.  Without it, every dependency at a distance
-// of three instructions would read a stale register.
-//
-// Reference: SPEC 7.2, 7.5.  Testbench: verif/unit/tb_s1_regfile.sv.
+// Reference: SPEC sections 7.2, 9.2, 17.  Testbench: verif/unit/tb_s1_regfile.sv.
+// Contract and design rationale: docs/modules/s1_regfile.md.
 // =============================================================================
 
 module s1_regfile
   import s1_pkg::*;
-(
+#(
+  parameter int unsigned N_READ = 2
+) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
 
-  // Read ports, combinational (ID)
-  input  logic [REG_ADDR_W-1:0] rs1_addr_i,
-  input  logic [REG_ADDR_W-1:0] rs2_addr_i,
-  output logic [XLEN-1:0]       rs1_data_o,
-  output logic [XLEN-1:0]       rs2_data_o,
+  // Read: address in one cycle, data in the next.
+  input  logic [REG_ADDR_W-1:0] raddr_i [N_READ],
+  output logic [XLEN-1:0]       rdata_o [N_READ],
 
-  // Architectural write port, from retire
-  input  rf_wr_t                wr_i
+  // Write, at retire (SPEC 9.2 step 1).  A write to x0 is discarded.
+  input  logic                  we_i,
+  input  logic [REG_ADDR_W-1:0] waddr_i,
+  input  logic [XLEN-1:0]       wdata_i
 );
 
-  localparam int unsigned N_REG = 2 ** REG_ADDR_W;
+  localparam int unsigned N_REG = 2**REG_ADDR_W;
 
-  logic [N_REG-1:0][XLEN-1:0] rf_q;
+  logic wr;
+  assign wr = we_i && (waddr_i != '0);
 
-  // x0 is hardwired: dropping the write here means no read path has to special
-  // case it, including the read-during-write bypass below.
-  logic we;
-  assign we = wr_i.we && (wr_i.addr != '0);
+  // Last cycle's write.  meds_s1_sram returns the OLD word when an address is
+  // read and written in the same cycle, so that write is bypassed from here.
+  logic                  wr_q;
+  logic [REG_ADDR_W-1:0] waddr_q;
+  logic [XLEN-1:0]       wdata_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      rf_q <= '0;
-    end else if (we) begin
-      rf_q[wr_i.addr] <= wr_i.data;
+      wr_q    <= 1'b0;
+      waddr_q <= '0;
+      wdata_q <= '0;
+    end else begin
+      wr_q    <= wr;
+      waddr_q <= waddr_i;
+      wdata_q <= wdata_i;
     end
   end
 
-  always_comb begin
-    rs1_data_o = (rs1_addr_i == '0) ? '0 : rf_q[rs1_addr_i];
-    rs2_data_o = (rs2_addr_i == '0) ? '0 : rf_q[rs2_addr_i];
-    if (we && rs1_addr_i == wr_i.addr) rs1_data_o = wr_i.data;
-    if (we && rs2_addr_i == wr_i.addr) rs2_data_o = wr_i.data;
-  end
+  for (genvar p = 0; p < N_READ; p++) begin : g_port
 
-  // rf_q[0] is never written and never read; keeping the array a full 2**5
-  // entries costs nothing and keeps the index width honest.
-  logic unused_x0;
-  assign unused_x0 = ^rf_q[0];
+    // meds_s1_sram has one port, and a read port is busy every cycle, so each
+    // read port owns two banks.  cur_q[r] names the bank holding register r.
+    // A read uses that bank; a write in the same cycle goes to the other bank
+    // and repoints cur_q, so neither bank ever sees two accesses at once.
+    logic [N_REG-1:0]      cur_q;
+    logic                  rsel, rsel_q;
+    logic [REG_ADDR_W-1:0] raddr_q;
+
+    assign rsel = cur_q[raddr_i[p]];
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        cur_q   <= '0;
+        rsel_q  <= 1'b0;
+        raddr_q <= '0;
+      end else begin
+        rsel_q  <= rsel;
+        raddr_q <= raddr_i[p];
+        if (wr) cur_q[waddr_i] <= ~rsel;
+      end
+    end
+
+    logic [1:0]           bank_wr;
+    logic [1:0][XLEN-1:0] bank_rdata;
+
+    for (genvar b = 0; b < 2; b++) begin : g_bank
+      assign bank_wr[b] = wr && (rsel != b[0]);
+
+      meds_s1_sram #(
+        .DW    (XLEN),
+        .DEPTH (N_REG)
+      ) u_sram (
+        .clk_i,
+        .rst_ni,
+        .req_i   (bank_wr[b] || (rsel == b[0])),
+        .we_i    (bank_wr[b]),
+        .addr_i  (bank_wr[b] ? waddr_i : raddr_i[p]),
+        .be_i    ('1),
+        .wdata_i (wdata_i),
+        .rdata_o (bank_rdata[b])
+      );
+    end
+
+    // Newest value first: a write retiring this cycle, then last cycle's
+    // write, then the bank that was read.
+    always_comb begin
+      if (raddr_q == '0) begin
+        rdata_o[p] = '0;
+      end else if (wr && (waddr_i == raddr_q)) begin
+        rdata_o[p] = wdata_i;
+      end else if (wr_q && (waddr_q == raddr_q)) begin
+        rdata_o[p] = wdata_q;
+      end else begin
+        rdata_o[p] = bank_rdata[rsel_q];
+      end
+    end
+
+  end
 
 endmodule

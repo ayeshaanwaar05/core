@@ -5,6 +5,7 @@
 #
 # Layout:
 #   rtl/pkg/s1_pkg.sv     shared types; compiled before everything else
+#   rtl/common/*.sv       platform-shared modules (meds_s1_sram), as upstream
 #   rtl/modules/*.sv      one file per module, one module per file
 #   rtl/top/s1_core.sv    the integrated core that wires the modules together
 #   simulation/           testbench, the test program and its generator
@@ -68,9 +69,10 @@ VERILATOR ?= verilator
 # rtl/top    the integrated core
 # simulation   testbench and its generated program
 PKG        = rtl/pkg/s1_pkg.sv
+COMMON     = $(sort $(wildcard rtl/common/*.sv))
 MODULES    = $(sort $(wildcard rtl/modules/*.sv))
 TOPRTL     = rtl/top/s1_core.sv
-RTL        = $(MODULES) $(TOPRTL)
+RTL        = $(COMMON) $(MODULES) $(TOPRTL)
 TB         = simulation/tb_s1_core.sv
 TOP        = tb_s1_core
 INC        = -Isimulation

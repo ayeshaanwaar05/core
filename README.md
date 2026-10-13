@@ -8,6 +8,7 @@ integration test that runs it against **spike**.
 ```
 rtl/
   pkg/s1_pkg.sv       shared types and constants; compiled before everything else
+  common/*.sv         platform-shared modules (meds_s1_sram), same path as upstream
   modules/*.sv        one file per module, one module per file
   top/s1_core.sv      the integrated core -- wires the modules together and
                       exposes everything external as ports
