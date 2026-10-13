@@ -2,6 +2,12 @@
 # Integration build for the assembled S1 core.
 #
 #   make lint     elaborate and lint the RTL      (strict: RTL only)
+#
+# Layout:
+#   rtl/pkg/s1_pkg.sv     shared types; compiled before everything else
+#   rtl/modules/*.sv      one file per module, one module per file
+#   rtl/top/s1_core.sv    the integrated core that wires the modules together
+#   simulation/           testbench, the test program and its generator
 #   make prog     regenerate prog.svh from rv64i.s via the RISC-V toolchain
 #   make test     build and run the RV64I integration testbench
 #   make clean
@@ -56,10 +62,18 @@
 # =============================================================================
 
 VERILATOR ?= verilator
-PKG        = s1_pkg.sv
-RTL        = $(filter-out $(PKG),$(filter-out $(wildcard tb_*.sv),$(wildcard *.sv)))
-TB         = tb_s1_core.sv
+
+# rtl/pkg    shared types, compiled first
+# rtl/modules  one file per module
+# rtl/top    the integrated core
+# simulation   testbench and its generated program
+PKG        = rtl/pkg/s1_pkg.sv
+MODULES    = $(sort $(wildcard rtl/modules/*.sv))
+TOPRTL     = rtl/top/s1_core.sv
+RTL        = $(MODULES) $(TOPRTL)
+TB         = simulation/tb_s1_core.sv
 TOP        = tb_s1_core
+INC        = -Isimulation
 
 WAIVE_RTL  = -Wno-UNUSEDPARAM
 WAIVE_TB   = $(WAIVE_RTL) -Wno-UNUSEDSIGNAL -Wno-BLKSEQ -Wno-SYNCASYNCNET \
@@ -73,13 +87,13 @@ lint:
 	@$(VERILATOR) --lint-only --timing -Wall $(WAIVE_RTL) \
 	  --top-module s1_core $(PKG) $(RTL) && echo "  lint clean"
 
-prog: prog.svh
+prog: simulation/prog.svh
 
-prog.svh: rv64i.s gen.py
-	@python3 gen.py
+simulation/prog.svh: simulation/rv64i.s simulation/gen.py
+	@python3 simulation/gen.py
 
 test:
-	@$(VERILATOR) --binary --timing -Wall $(WAIVE_TB) \
+	@$(VERILATOR) --binary --timing -Wall $(WAIVE_TB) $(INC) \
 	  --top-module $(TOP) -Mdir obj -o $(TOP) $(PKG) $(RTL) $(TB)
 	@./obj/$(TOP)
 

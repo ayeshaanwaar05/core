@@ -5,8 +5,11 @@ Nothing here models the ISA."""
 import re, subprocess, sys, pathlib
 
 BASE = 0x80000000
-SRC  = "rv64i.s"
-ELF  = "rv64i.elf"
+HERE = pathlib.Path(__file__).resolve().parent     # run from anywhere
+SRC  = str(HERE / "rv64i.s")
+ELF  = str(HERE / "rv64i.elf")
+BIN  = str(HERE / "prog.bin")
+OUT  = HERE / "prog.svh"
 RV   = "/opt/riscv/bin"
 
 # ---- assemble and link at BASE ---------------------------------------------
@@ -17,15 +20,15 @@ subprocess.run([f"{RV}/riscv64-unknown-elf-gcc", "-march=rv64i", "-mabi=lp64",
 
 # ---- image: objcopy -> flat binary -> 32-bit words ---------------------------
 subprocess.run([f"{RV}/riscv64-unknown-elf-objcopy", "-O", "binary",
-                "--only-section=.text", ELF, "prog.bin"], check=True)
-blob  = pathlib.Path("prog.bin").read_bytes()
+                "--only-section=.text", ELF, BIN], check=True)
+blob  = pathlib.Path(BIN).read_bytes()
 words = [int.from_bytes(blob[i:i+4], "little") for i in range(0, len(blob), 4)]
 
 # ---- expectations: spike commit log ----------------------------------------
 spin = BASE + len(blob) - 4                      # the final self-branch
-cmds = pathlib.Path("cmds"); cmds.write_text(f"until pc 0 {hex(spin)}\nq\n")
+cmds = HERE / "cmds"; cmds.write_text(f"until pc 0 {hex(spin)}\nq\n")
 log = subprocess.run([f"{RV}/spike", "--isa=rv64i", "--log-commits",
-                      "-d", "--debug-cmd=cmds", ELF],
+                      "-d", f"--debug-cmd={cmds}", ELF],
                      capture_output=True, text=True).stderr
 
 # core   0: 3 0x<pc> (0x<insn>) x<rd>  0x<val>
@@ -70,5 +73,5 @@ for i, r in enumerate(recs):
     out.append(f"  exp({i}, 64'h{r['pc']:x}, 32'h{r['insn']:08x}, 5'd{r['rd']}, "
                f"64'h{r['val']:016x}, 64'h{r['npc']:x});")
 out.append("endtask")
-pathlib.Path("prog.svh").write_text("\n".join(out) + "\n")
-print(f"prog.svh: {len(words)} words, {len(recs)} retirements")
+OUT.write_text("\n".join(out) + "\n")
+print(f"{OUT.relative_to(HERE.parent)}: {len(words)} words, {len(recs)} retirements")
