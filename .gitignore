@@ -4,12 +4,12 @@ obj_dir/
 *.vcd
 *.fst
 
-# generator intermediates (simulation/prog.svh IS committed)
-simulation/prog.bin
-simulation/rv64i.elf
+# generator intermediates -- simulation/prog.svh IS committed
+simulation/*.elf
+simulation/*.bin
 simulation/cmds
 
-# stray intermediates if gen.py is ever run from the root
-/prog.bin
-/rv64i.elf
+# stray intermediates if gen.py is ever run from the repo root
+/*.elf
+/*.bin
 /cmds

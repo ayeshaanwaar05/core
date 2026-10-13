@@ -9,7 +9,8 @@
 #   rtl/modules/*.sv      one file per module, one module per file
 #   rtl/top/s1_core.sv    the integrated core that wires the modules together
 #   simulation/           testbench, the test program and its generator
-#   make prog     regenerate prog.svh from rv64i.s via the RISC-V toolchain
+#   make prog     regenerate prog.svh from simulation/$(PROG).s via the toolchain
+#                 PROG defaults to rv64i; `make prog PROG=seq` for another
 #   make test     build and run the RV64I integration testbench
 #   make test-unit  build and run the unit testbenches (s1_hazard)
 #   make clean
@@ -90,10 +91,12 @@ lint:
 	@$(VERILATOR) --lint-only --timing -Wall $(WAIVE_RTL) \
 	  --top-module s1_core $(PKG) $(RTL) && echo "  lint clean"
 
-prog: simulation/prog.svh
+# PROG selects the program in simulation/<PROG>.s.  One at a time:
+#   make prog PROG=seq && make test
+PROG ?= rv64i
 
-simulation/prog.svh: simulation/rv64i.s simulation/gen.py
-	@python3 simulation/gen.py
+prog:
+	@python3 simulation/gen.py $(PROG)
 
 test:
 	@$(VERILATOR) --binary --timing -Wall $(WAIVE_TB) $(INC) \

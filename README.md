@@ -84,6 +84,72 @@ machine with no toolchain, and inside the Verilator container.
 | 11 loads and stores | no LSU — not this group's module |
 | `ecall`, `ebreak` | need a trap handler in the program; next step |
 
+## What is tested, and what is not
+
+Two programs, selected with `PROG`. Both check every retirement against spike.
+
+| `PROG` | | |
+|---|---|---|
+| `rv64i` | 55 retirements, 398 checks | 39/39 RV64I instructions, no memory |
+| `seq` | 12 retirements, 97 checks | store, forwarded load, bus load, load-use, taken branch |
+
+**The data port is tied off unless the program needs it.** `gen.py` inspects the
+assembled opcodes and emits `PROG_USES_MEM`. With no load or store in the
+program — the default, `rv64i` — the testbench ties `dmem_*` off and *asserts it
+was never driven*:
+
+```
+data port tied off and never driven (no load/store in program)
+```
+
+That is the claim this repo makes about the LSU: **the signals are wired for a
+future integration and nothing here exercises them.** No LSU is built here;
+`rtl/modules/s1_mem.sv` is the MEM stage, which issues those requests.
+
+A program that does contain loads or stores turns the memory on, so the MEM
+stage can be exercised. `seq` is worth reading for what it then shows:
+
+```
+data accesses: 1 loads, 1 stores
+```
+
+Two loads execute but only one reaches the bus. `lw x9, 0x20(x3)` is satisfied by
+**byte-wise forwarding from the store buffer**, because the store to that address
+is still buffered; `lw x6, 0x40(x3)` has no preceding store so it must read the
+bus. The single store is that buffered write draining after it committed. Both
+loads return spike-identical values.
+
+### TODO
+
+Verified today, on the paths the two programs reach:
+
+- [x] 39/39 RV64I instructions excluding loads, stores, `ecall`, `ebreak`
+- [x] RAW forwarding — 6 back-to-back dependencies, including into a `jalr` target
+- [x] store → load forwarding out of the store buffer
+- [x] a load that misses the store buffer and reads the bus
+- [x] load-use, on both a forwarded and a bus load
+- [x] taken and not-taken branches for all six conditions, `jal`, `jalr`
+
+Not yet, and why:
+
+- [ ] **`ecall` / `ebreak` and a trap handler.** Needs a handler in the program;
+      exercises `s1_csr`'s trap path, `mepc`/`mcause` and WB taking the trap.
+      Nothing external is missing — this is the next thing to write.
+- [ ] **CSR instructions** (`csrrw`/`csrrs`/`csrrc`). `s1_id` implements CSR
+      serialisation (`ser_stall`) and no program reaches it. Also not blocked.
+- [ ] **RV64M.** Needs the external multiply/divide unit; `md_*` is tied off and
+      the testbench asserts no multiply was ever dispatched.
+- [ ] **Misaligned and faulting accesses.** The PMA/PMP tie-off always allows, so
+      no access is ever refused. Needs the real checkers to be meaningful.
+- [ ] **Both programs in one `make test`.** `PROG` runs one at a time; the second
+      overwrites `prog.svh`. Needs the testbench to loop with a reset between.
+- [ ] **Proof that forwarding happens rather than a stall.** The checks confirm
+      the values, not the mechanism — a stall that read the register file would
+      give the same answer. `data accesses` is the one place we see a mechanism
+      directly. Cycle counts or probing `rs1_fwd` would settle it.
+- [ ] **RVFI's memory group** (`rvfi.mem`) is not checked. Spike's commit log
+      carries the address and data; `gen.py` currently drops them.
+
 ## What is deliberately absent
 
 Three things the core declares as external and this repo does not build. They are
@@ -92,7 +158,7 @@ program reaches them — and the testbench asserts they were never used:
 
 | Ports | Block |
 |---|---|
-| `dmem_*` | the D$ / LSU |
+| `dmem_*` | the D$ behind the MEM stage — on only when the program has a load or store |
 | `chk_*`, `pma_*`, `pmp_allow_i` | the PMA and PMP checkers |
 | `md_*` | the RV64M multiply/divide unit |
 

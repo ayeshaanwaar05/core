@@ -2,6 +2,7 @@
 // Image from riscv64-unknown-elf-objcopy; expectations from spike.
 // 63 words, 55 retirements, base 0x80000000
 
+localparam bit PROG_USES_MEM = 1'b0;
 localparam int unsigned N_WORDS = 63;
 localparam int unsigned N_EXP   = 55;
 localparam logic [63:0] PROG_BASE = 64'h80000000;

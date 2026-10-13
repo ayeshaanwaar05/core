@@ -89,9 +89,6 @@ module tb_s1_core
   // Tie-offs for the three external blocks and the data port
   // ---------------------------------------------------------------------------
   always_comb begin
-    dmem_req_ready = 1'b1;              // accept, but nothing is ever issued
-    dmem_rsp_valid = 1'b0;
-    dmem_rsp       = '0;
     irq            = '0;
     // permissive PMA and PMP: never queried, since no data access occurs
     pma            = '0;
@@ -103,6 +100,54 @@ module tb_s1_core
     pmp_allow      = 1'b1;
     md_done        = 1'b0;              // no RV64M instruction is executed
     md_result      = '0;
+  end
+
+  // ---------------------------------------------------------------------------
+  // Data memory.  MEM-REQ: one XLEN beat per request, `be` selecting the bytes
+  // within the beat the request's address falls in.  A program with no load or
+  // store simply never drives it.
+  // ---------------------------------------------------------------------------
+  // PROG_USES_MEM comes from prog.svh.  With no load or store in the program
+  // the port is tied off and the end-of-run check proves it was never driven:
+  // the signals exist for a future LSU and nothing here exercises them.
+  byte unsigned dmem [longint unsigned];
+
+  assign dmem_req_ready = PROG_USES_MEM;
+
+  function automatic logic [XLEN-1:0] dmem_beat(logic [XLEN-1:0] a);
+    logic [XLEN-1:0] base, d;
+    base = {a[XLEN-1:3], 3'b000};
+    d    = '0;
+    for (int unsigned i = 0; i < XLEN/8; i++)
+      if (dmem.exists(base + i) != 0) d[i*8 +: 8] = dmem[base + i];
+    return d;
+  endfunction
+
+  int unsigned n_ld = 0, n_st = 0;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      dmem_rsp_valid <= 1'b0;
+      dmem_rsp       <= '0;
+    end else begin
+      dmem_rsp_valid <= 1'b0;
+      dmem_rsp       <= '0;
+      if (PROG_USES_MEM && dmem_req_valid && dmem_req_ready) begin
+        logic [XLEN-1:0] base;
+        base = {dmem_req.addr[XLEN-1:3], 3'b000};
+        if (dmem_req.we) begin
+          for (int unsigned i = 0; i < XLEN/8; i++)
+            if (dmem_req.be[i]) dmem[base + i] = dmem_req.wdata[i*8 +: 8];
+          n_st++;
+        end else begin
+          n_ld++;
+        end
+        dmem_rsp_valid <= 1'b1;
+        dmem_rsp.rdata <= dmem_beat(dmem_req.addr);
+        dmem_rsp.err   <= 1'b0;
+        dmem_rsp.id    <= dmem_req.id;
+      end
+    end
   end
 
   // ---------------------------------------------------------------------------
@@ -222,8 +267,16 @@ module tb_s1_core
 
     check("every instruction retired", XLEN'(retired >= n_exp), 1);
     check("no store error",            XLEN'(store_err), 0);
-    check("no spurious data access",   XLEN'(dmem_req_valid), 0);
     check("no multiply dispatched",    XLEN'(md_start), 0);
+    if (PROG_USES_MEM)
+      $display("data accesses: %0d loads, %0d stores", n_ld, n_st);
+    else begin
+      // The point of the default configuration: the data port is wired and
+      // provably unused.
+      check("data port never driven",  XLEN'(n_ld + n_st), 0);
+      check("data port idle at end",   XLEN'(dmem_req_valid), 0);
+      $display("data port tied off and never driven (no load/store in program)");
+    end
 
     check("the spin was reached", XLEN'(spun > 0), 1);
     $display("retired %0d of %0d program instructions, then spun %0d times",
