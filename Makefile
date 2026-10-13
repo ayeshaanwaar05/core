@@ -11,6 +11,7 @@
 #   simulation/           testbench, the test program and its generator
 #   make prog     regenerate prog.svh from rv64i.s via the RISC-V toolchain
 #   make test     build and run the RV64I integration testbench
+#   make test-unit  build and run the unit testbenches (s1_hazard)
 #   make clean
 #
 # -----------------------------------------------------------------------------
@@ -81,8 +82,8 @@ WAIVE_RTL  = -Wno-UNUSEDPARAM
 WAIVE_TB   = $(WAIVE_RTL) -Wno-UNUSEDSIGNAL -Wno-BLKSEQ -Wno-SYNCASYNCNET \
              -Wno-WIDTHEXPAND -Wno-DECLFILENAME
 
-.PHONY: all lint prog test clean
-all: lint test
+.PHONY: all lint prog test test-unit clean
+all: lint test test-unit
 
 lint:
 	@echo "lint + elaborate: s1_core  (RTL only, -Wall $(WAIVE_RTL))"
@@ -98,6 +99,20 @@ test:
 	@$(VERILATOR) --binary --timing -Wall $(WAIVE_TB) $(INC) \
 	  --top-module $(TOP) -Mdir obj -o $(TOP) $(PKG) $(RTL) $(TB)
 	@./obj/$(TOP)
+
+# One unit testbench per module, simulation/tb_<module>.sv, built on the
+# package and the RTL like the integration one.
+UNIT_TBS   = tb_s1_hazard
+
+test-unit:
+	@mkdir -p obj
+	@for tb in $(UNIT_TBS); do \
+	  $(VERILATOR) --binary --timing -Wall $(WAIVE_TB) $(INC) \
+	    --top-module $$tb -Mdir obj/$$tb -o $$tb $(PKG) $(RTL) simulation/$$tb.sv \
+	    > obj-$$tb.log 2>&1 || { cat obj-$$tb.log; rm -f obj-$$tb.log; exit 1; }; \
+	  rm -f obj-$$tb.log; \
+	  echo "$$tb"; ./obj/$$tb/$$tb || exit 1; \
+	done
 
 clean:
 	@rm -rf obj

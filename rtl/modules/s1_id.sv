@@ -6,48 +6,13 @@
 // Author(s)    : integration (Oct,2026)
 // Modified By  :
 //
-// s1_id        : ID stage -- decode, register read, hazards        [COMPLETE]
+// s1_id        : ID stage -- decode, hazards, ID/EX register    [WIP -- T-02]
 // Description  :
-// Instantiates s1_decode, reads the register file, resolves each operand,
-// assigns the in-flight tag, and owns the ID/EX register.
+// Instantiates s1_decode and s1_hazard, assigns the in-flight tag, and owns
+// the ID/EX register.  The decode is in s1_decode and every forwarding and
+// stall decision is in s1_hazard; what is left here is the stage's handshake.
 //
-// Reference: SPEC 7.2, 8.1, 8.2.  Testbench: verif/unit/tb_s1_id.sv.
-//
-// -----------------------------------------------------------------------------
-// FORWARDING IN A 5-STAGE, IN-ORDER PIPELINE
-//
-// Three places can hold a producer this stage has to read around, and the only
-// thing that distinguishes them is whether the value exists yet:
-//
-//   in EX now          its result is computed this cycle and registered into
-//                      EX/MEM at this edge.  The value does NOT exist yet, so
-//                      EX must read it out of its own EX/MEM register next
-//                      cycle: FWD_EXMEM.  Penalty 0.
-//                      Exact, because the consumer enters EX only when EX
-//                      accepted the producer -- the same event that moves the
-//                      producer into the register the consumer then reads.
-//
-//   in EX/MEM now      the value is already on `exmem_i.result` where this
-//                      stage can see it, so it is captured here into
-//                      rs1_val/rs2_val and EX is handed a plain number.
-//
-//   at MEM's output    WB is committing it this cycle, and the register file's
-//                      read-during-write bypass already returns the new value.
-//                      Nothing special to do: FWD_RF is correct.
-//
-// A LOAD is the exception to the first two: its result is not final until MEM
-// has answered, so a consumer stalls until the value shows up at MEM's output,
-// where the register-file bypass picks it up.
-//
-// COST, STATED PLAINLY.  Load-use costs 2 cycles where a textbook 5-stage
-// costs 1.  The missing cycle is MEM/WB forwarding straight into EX's operand
-// mux: a consumer could sit in EX in the cycle MEM produces the value, but
-// only if EX can be told "your operand is not ready yet" and hold.  That needs
-// MEM to export a completion signal and EX to gate its first-cycle operand
-// capture on it -- two module interfaces, deliberately not changed here.
-// Everything else keeps its textbook penalty: back-to-back ALU dependencies
-// are free, and EV_LOAD_USE counts what this actually costs.
-// -----------------------------------------------------------------------------
+// Reference: SPEC 7.2.  Testbench: simulation/tb_s1_core.sv (integration only).
 // =============================================================================
 
 module s1_id
@@ -118,97 +83,52 @@ module s1_id
   assign out_free = !ex_valid_q || ex_ready_i;
 
   // ---------------------------------------------------------------------------
-  // Hazards
+  // Hazards (SPEC 8).  The instruction in EX is this stage's own ID/EX
+  // register; the one in EX/MEM comes from s1_ex.
   // ---------------------------------------------------------------------------
-
-  // Is a producer's result final by the time it reaches the EX/MEM register?
-  // True for the ALU, a CSR read and RV64M (which now completes inside EX).
-  // False for a load, an LR or an AMO: MEM replaces the result.
-  function automatic logic final_at_ex(exec_unit_e u);
-    return (u == UNIT_ALU) || (u == UNIT_CSR)
-        || (u == UNIT_MUL) || (u == UNIT_DIV);
-  endfunction
-
-  // The instruction in EX right now
-  logic ex_writes;
-  assign ex_writes = ex_valid_q && ex_q.op.rd_we && (ex_q.op.rd != '0);
-
-  // The instruction in EX/MEM right now.  `is_load`/`amo_op` travel in
-  // ex_mem_t, so whether its result is final is readable directly.
-  logic exmem_writes, exmem_final;
-  assign exmem_writes = exmem_valid_i && exmem_i.rd_we && (exmem_i.rd != '0);
-  assign exmem_final  = !exmem_i.is_load && (exmem_i.amo_op == AMO_NONE);
-
-  logic     need1, need2;
-  fwd_src_e src1, src2;
-  logic     stall1, stall2, lu1, lu2;
+  fwd_src_e        src1, src2;
   logic [XLEN-1:0] val1, val2;
+  logic            hz_stall, load_use;
 
-  assign need1 = dec.rs1_re && (dec.rs1 != '0);
-  assign need2 = dec.rs2_re && (dec.rs2 != '0);
+  s1_hazard u_hazard (
+    .rs1_addr_i        (dec.rs1),
+    .rs1_re_i          (dec.rs1_re),
+    .rs1_rf_i          (rs1_data_i),
+    .rs2_addr_i        (dec.rs2),
+    .rs2_re_i          (dec.rs2_re),
+    .rs2_rf_i          (rs2_data_i),
+    .csr_op_i          (dec.csr_op),
+    .sys_op_i          (dec.sys_op),
 
-  // One operand's resolution.  Written once and called twice so the two
-  // operands cannot drift apart.
-  task automatic resolve(input logic           need,
-                         input logic [REG_ADDR_W-1:0] addr,
-                         input logic [XLEN-1:0] rf_val,
-                         output fwd_src_e       src,
-                         output logic [XLEN-1:0] val,
-                         output logic           stall,
-                         output logic           load_use);
-    src      = FWD_RF;
-    val      = rf_val;
-    stall    = 1'b0;
-    load_use = 1'b0;
-    if (need && ex_writes && (ex_q.op.rd == addr)) begin
-      if (final_at_ex(ex_q.op.unit)) begin
-        src = FWD_EXMEM;                 // value appears next cycle, in EX/MEM
-      end else begin
-        stall    = 1'b1;                 // a load in EX: classic load-use
-        load_use = 1'b1;
-      end
-    end else if (need && exmem_writes && (exmem_i.rd == addr)) begin
-      if (exmem_final) begin
-        val = exmem_i.result;            // already computed, capture it here
-      end else begin
-        stall    = 1'b1;                 // a load in EX/MEM: wait for MEM
-        load_use = 1'b1;
-      end
-    end
-    // Otherwise the register file is right, including the instruction WB is
-    // committing this cycle -- the file's read-during-write bypass covers it.
-  endtask
+    .ex_valid_i        (ex_valid_q),
+    .ex_rd_i           (ex_q.op.rd),
+    .ex_rd_we_i        (ex_q.op.rd_we),
+    .ex_unit_i         (ex_q.op.unit),
 
-  always_comb begin
-    resolve(need1, dec.rs1, rs1_data_i, src1, val1, stall1, lu1);
-    resolve(need2, dec.rs2, rs2_data_i, src2, val2, stall2, lu2);
-  end
+    .exmem_valid_i     (exmem_valid_i),
+    .exmem_rd_i        (exmem_i.rd),
+    .exmem_rd_we_i     (exmem_i.rd_we),
+    .exmem_is_load_i   (exmem_i.is_load),
+    .exmem_amo_op_i    (exmem_i.amo_op),
+    .exmem_result_i    (exmem_i.result),
 
-  // ---------------------------------------------------------------------------
-  // Serialisation.
-  //
-  // A CSR access reads the CSR file in EX, but a CSR write does not land until
-  // WB -- so an older CSR write still in flight would not be visible.  Rather
-  // than forward CSR values (a second forwarding network for the rarest
-  // instructions in the ISA), a CSR or system instruction simply waits for the
-  // pipeline ahead of it to drain.  The same rule covers xRET and the fences,
-  // whose effect is also taken in WB.
-  //
-  // This cannot deadlock: the instructions ahead are in order and all complete
-  // in bounded time, and the one being held has not been issued, so nothing is
-  // waiting on it.
-  // ---------------------------------------------------------------------------
-  logic serialise, ser_stall;
-  assign serialise = (dec.csr_op != CSR_NONE) || (dec.sys_op != SYS_NONE);
-  assign ser_stall = serialise && (ex_valid_q || downstream_busy_i);
+    .downstream_busy_i (downstream_busy_i),
+
+    .rs1_fwd_o         (src1),
+    .rs1_val_o         (val1),
+    .rs2_fwd_o         (src2),
+    .rs2_val_o         (val2),
+
+    .stall_o           (hz_stall),
+    .load_use_o        (load_use)
+  );
 
   // ---------------------------------------------------------------------------
   // Issue
   // ---------------------------------------------------------------------------
-  logic hz_stall, can_issue, issue;
+  logic can_issue, issue;
 
-  assign hz_stall  = stall1 || stall2;
-  assign can_issue = out_free && !hz_stall && !ser_stall;
+  assign can_issue = out_free && !hz_stall;
   assign issue     = fetch_rsp_valid_i && can_issue && !kill;
 
   // Independent of the kill: on a kill IF drops its own valid in the same
@@ -253,12 +173,11 @@ module s1_id
   assign ex_valid_o = ex_valid_q;
   assign ex_o       = ex_q;
 
-  assign perf_load_use_o     = fetch_rsp_valid_i && (lu1 || lu2);
-  assign perf_hazard_stall_o = fetch_rsp_valid_i && (hz_stall || ser_stall);
+  assign perf_load_use_o     = fetch_rsp_valid_i && load_use;
+  assign perf_hazard_stall_o = fetch_rsp_valid_i && hz_stall;
 
-  // Only rd, rd_we, result, is_load and amo_op are read above; the rest of
-  // ex_mem_t is on its way to MEM and WB and passes through this stage's
-  // sight without being its business.
+  // Only rd, rd_we, result, is_load and amo_op go to the hazard unit; the rest
+  // of ex_mem_t is on its way to MEM and WB and is not this stage's business.
   logic unused;
   assign unused = ^exmem_i;
 

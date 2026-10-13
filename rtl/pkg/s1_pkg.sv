@@ -274,7 +274,7 @@ package s1_pkg;
   // must read it out of its own EX/MEM register next cycle.  FWD_RF means the
   // value is already known in ID and travels in rs1_val/rs2_val -- whether it
   // came from the register file, from the EX/MEM register, or from MEM's
-  // output in the cycle it completed.  See s1_id.sv for why resolving in ID is
+  // output in the cycle it completed.  See s1_hazard.sv for why resolving in ID is
   // the only timing that works.
   typedef enum logic [0:0] {
     FWD_RF, FWD_EXMEM
