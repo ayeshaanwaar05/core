@@ -129,7 +129,7 @@ module s1_ex
 
   assign pc_len   = op.pc + (ex_i.compressed ? XLEN'(RVC_BYTES) : XLEN'(INSTR_BYTES));
   assign pc_imm   = op.pc + op.imm;
-  assign agu      = rs1 + (op.is_amo ? '0 : op.imm);      // AMO/LR/SC: rs1 only
+  assign agu      = rs1 + ((op.amo_op != AMO_NONE) ? '0 : op.imm);      // AMO/LR/SC: rs1 only
   assign jalr_tgt = {agu[XLEN-1:1], 1'b0};
 
   // ---------------------------------------------------------------------------
@@ -137,12 +137,14 @@ module s1_ex
   // non-zero; RW with rd=x0 does not read (Zicsr).
   // ---------------------------------------------------------------------------
   logic [XLEN-1:0] csr_src, csr_wdata;
-  logic            csr_write, csr_read, csr_ok;
+  logic            csr_write, csr_read, csr_ok, is_csr;
+
+  assign is_csr    = (op.csr_op != CSR_NONE);
 
   assign csr_src   = op.csr_imm ? op.imm : rs1;
   assign csr_write = (op.csr_op == CSR_RW) || (op.rs1 != '0);
   assign csr_read  = !(op.csr_op == CSR_RW && op.rd == '0);
-  assign csr_ok    = live && op.is_csr && !ex_i.exc && !op.illegal;
+  assign csr_ok    = live && is_csr && !ex_i.exc && !op.illegal;
 
   always_comb begin
     csr_wdata = csr_rdata_i;
@@ -174,7 +176,9 @@ module s1_ex
       exc     = 1'b1;
       exccode = ex_i.exccode;
       exctval = ex_i.exctval;
-    end else if (op.illegal || (op.is_csr && csr_illegal_i)) begin
+    end else if (op.illegal || op.mxif_candidate || (is_csr && csr_illegal_i)) begin
+      // An MXIF candidate is illegal unless a coprocessor accepts it (SPEC
+      // 7.2).  This core has no MXIF port, so nobody can.
       exc     = 1'b1;
       exccode = EXC_ILLEGAL_INSTR;
       exctval = XLEN'(ex_i.instr_raw);
@@ -261,12 +265,13 @@ module s1_ex
   ex_mem_t out;
   always_comb begin
     out          = '0;
+    out.amo_op   = AMO_NONE;   // not '0, which is AMO_LR
     out.tag   = ex_i.tag;
     out.rd       = op.rd;
     out.rd_we    = op.rd_we && !exc;
     out.result   = is_md                       ? md_result
                  : (op.is_jal || op.is_jalr)   ? pc_len
-                 : op.is_csr                   ? csr_rdata_i
+                 : is_csr                      ? csr_rdata_i
                  :                               alu_res;
     out.next_pc  = next_pc;
     // Carried for WB, which is the commit point now that there is no buffer.
@@ -281,7 +286,6 @@ module s1_ex
     if (!exc) begin
       out.is_load    = op.is_load;
       out.is_store   = op.is_store;
-      out.is_amo     = op.is_amo;
       out.mem_size   = op.mem_size;
       out.mem_signed = op.mem_signed;
       out.amo_op     = op.amo_op;
@@ -289,7 +293,7 @@ module s1_ex
       out.rl         = op.rl;
       out.mem_addr   = agu;
       out.mem_wdata  = rs2;
-      out.csr_we     = op.is_csr && csr_write;
+      out.csr_we     = is_csr && csr_write;
       out.csr_addr   = op.csr_addr;
       out.csr_wdata  = csr_wdata;
     end
@@ -299,6 +303,7 @@ module s1_ex
     if (!rst_ni) begin
       mem_valid_q <= 1'b0;
       mem_q       <= '0;
+      mem_q.amo_op <= AMO_NONE;
       busy_q      <= 1'b0;
       rs1_q       <= '0;
       rs2_q       <= '0;
@@ -326,7 +331,6 @@ module s1_ex
   // Consumed elsewhere: hazard fields (ID), MXIF/CB bookkeeping (CB), and
   // bits EX derives differently (instr: instr_raw is the mtval source).
   logic unused_op;
-  assign unused_op = ^{op.rs1_re, op.rs2_re, op.is_mul, op.is_div,
-                       op.is_cbo, op.cbo_op, op.instr};
+  assign unused_op = ^{op.rs1_re, op.rs2_re, op.cbo_op, op.instr};
 
 endmodule

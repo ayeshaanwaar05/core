@@ -99,9 +99,8 @@ package s1_pkg;
   // Where a completed instruction's result came from
   // ---------------------------------------------------------------------------
   typedef enum logic [2:0] {
-    UNIT_ALU, UNIT_LSU, UNIT_MUL, UNIT_DIV, UNIT_CSR, UNIT_NONE
+    UNIT_ALU, UNIT_LSU, UNIT_MUL, UNIT_DIV, UNIT_CSR, UNIT_MXIF, UNIT_NONE
   } exec_unit_e;
-
 
   // ---------------------------------------------------------------------------
   // Decode-stage types (rtl/core/s1_decode.sv)
@@ -164,6 +163,7 @@ package s1_pkg;
     // -- classification ------------------------------------------------------
     exec_unit_e             unit;            // which path through EX this op takes
     logic                   illegal;         // nothing will ever accept this encoding
+    logic                   mxif_candidate;  // unit==UNIT_MXIF: unrecognised encoding, offered to a coprocessor (SPEC 7.2)
 
     // -- register addressing ---------------------------------------------------
     logic [REG_ADDR_W-1:0]  rs1;             // raw instr[19:15]; uimm[4:0] when csr_imm=1
@@ -186,24 +186,21 @@ package s1_pkg;
     logic                   is_jalr;
 
     // -- load / store / atomic / cache-block (consumed by s1_lsu.sv) ---------------
+    // All four are unit==UNIT_LSU.  An atomic is amo_op != AMO_NONE and a
+    // cache-block op is cbo_op != CBO_NONE; there is no separate flag for either.
     logic                   is_load;
     logic                   is_store;
-    logic                   is_amo;
     ls_size_e               mem_size;
     logic                   mem_signed;
     amo_op_e                amo_op;
     logic                   aq;
     logic                   rl;
-    logic                   is_cbo;          // Zicbom/Zicboz; address = rs1, no offset
-    cbo_op_e                cbo_op;
+    cbo_op_e                cbo_op;          // Zicbom/Zicboz; address = rs1, no offset
 
-    // -- multiply / divide --------------------------------------------------------
-    logic                   is_mul;
-    logic                   is_div;
+    // -- multiply / divide: unit==UNIT_MUL or UNIT_DIV ------------------------------
     muldiv_op_e             muldiv_op;
 
-    // -- CSR (Zicsr), consumed by s1_csr.sv -----------------------------------------
-    logic                   is_csr;
+    // -- CSR (Zicsr), consumed by s1_csr.sv: csr_op != CSR_NONE ---------------------
     csr_op_e                csr_op;
     logic                   csr_imm;         // operand is uimm[4:0] (rs1 field), not rs1
     logic [11:0]            csr_addr;
@@ -308,10 +305,9 @@ package s1_pkg;
     logic [XLEN-1:0]       next_pc;     // actual successor (RVFI pc_wdata)
     logic                  is_load;
     logic                  is_store;
-    logic                  is_amo;
     ls_size_e              mem_size;
     logic                  mem_signed;
-    amo_op_e               amo_op;
+    amo_op_e               amo_op;      // AMO_NONE unless LR/SC/AMO; EX never leaves it at '0
     logic                  aq;
     logic                  rl;
     logic [XLEN-1:0]       mem_addr;

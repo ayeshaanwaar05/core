@@ -14,7 +14,12 @@
 
 module s1_decode
   import s1_pkg::*;
-(
+#(
+  // Whether a coprocessor is attached at all (soc.yaml MXIF_EN, SPEC 5.3's
+  // per-config MXIF column).  With this clear, every unrecognised opcode is
+  // illegal instead of an MXIF candidate -- SPEC 7.2 design note.
+  parameter bit MXIF_EN = 1'b1
+) (
   input  logic [ILEN-1:0] instr_i,
   input  logic [XLEN-1:0] pc_i,
 
@@ -446,17 +451,20 @@ module s1_decode
       default: ;  // unrecognised opcode
     endcase
 
-    // Anything not recognised above -- an unknown opcode, or a reserved
-    // encoding under a known one -- is illegal.  Starting again from `blank`
+    // Anything not recognised above -- an unknown opcode, or a reserved encoding
+    // under a known one -- is offered to the coprocessor if one is attached, and
+    // is illegal otherwise (SPEC 7.2 design note).  Starting again from `blank`
     // drops whatever a partly-matched path had already set.
-    //
-    // SPEC 7.2's design note has the decoder mark an unrecognised encoding as
-    // a coprocessor candidate instead, so that custom instructions need no
-    // decoder change.  This core has no coprocessor port, so there is nobody
-    // to offer it to and the honest answer is illegal-instruction.  Restoring
-    // that behaviour is a contained change -- see core5/docs/INTEGRATING.md.
     if (decoded_o.illegal) begin
       decoded_o = blank;
+      if (MXIF_EN) begin
+        decoded_o.unit           = UNIT_MXIF;
+        decoded_o.mxif_candidate = 1'b1;
+        decoded_o.illegal        = 1'b0;
+        decoded_o.rs1_re         = 1'b1;  // offered conservatively; the coprocessor may ignore either
+        decoded_o.rs2_re         = 1'b1;
+        decoded_o.rd_we          = 1'b1;  // not known here: the CB takes it from x_issue_writeback
+      end
     end
 
     // Defensive structural check, not an ISA rule: a still-compressed
@@ -465,26 +473,6 @@ module s1_decode
     if (instr_i[1:0] != 2'b11) begin
       decoded_o = blank;
     end
-
-    // -------------------------------------------------------------------------
-    // INTEGRATION (C1).  The class flags, derived last so every path above --
-    // including the two that restart from `blank` -- is already settled.
-    //
-    // This module was written against a decoded_op_t that did not carry them:
-    // it described a class by its enum alone.  The integrated package (from
-    // #14/#15) has both, and EX and MEM read the flags, not the enums --
-    // EX for the AMO address and the CSR path, MEM for LR/SC/AMO.  Left
-    // undriven they would have read 0 out of `blank` rather than X, so nothing
-    // would have flagged it: AMO would have addressed rs1+imm instead of rs1,
-    // every CSR read would have returned 0 and never written, and LR/SC/AMO
-    // would have been plain loads.  Derivation, not duplication, keeps the
-    // enum the single source of truth.
-    // -------------------------------------------------------------------------
-    decoded_o.is_amo = (decoded_o.amo_op    != AMO_NONE);
-    decoded_o.is_cbo = (decoded_o.cbo_op    != CBO_NONE);
-    decoded_o.is_csr = (decoded_o.csr_op    != CSR_NONE);
-    decoded_o.is_mul = (decoded_o.unit      == UNIT_MUL);
-    decoded_o.is_div = (decoded_o.unit      == UNIT_DIV);
   end
 
 endmodule

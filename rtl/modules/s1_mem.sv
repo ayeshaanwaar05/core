@@ -137,9 +137,9 @@ module s1_mem
   logic [WIN_BYTES-1:0] in_mask;
   logic [WIN_W-1:0]     in_wdata;
 
-  assign is_lr   = mem_i.is_amo && mem_i.amo_op == AMO_LR;
-  assign is_sc   = mem_i.is_amo && mem_i.amo_op == AMO_SC;
-  assign is_amox = mem_i.is_amo && !is_lr && !is_sc && mem_i.amo_op != AMO_NONE;
+  assign is_lr   = (mem_i.amo_op == AMO_LR);
+  assign is_sc   = (mem_i.amo_op == AMO_SC);
+  assign is_amox = (mem_i.amo_op != AMO_NONE) && !is_lr && !is_sc;
   assign rd_acc  = mem_i.is_load  || is_lr || is_amox;
   assign wr_acc  = mem_i.is_store || is_sc || is_amox;
   assign in_sext = mem_i.is_load ? mem_i.mem_signed : 1'b1;   // LR and AMO results sign-extend

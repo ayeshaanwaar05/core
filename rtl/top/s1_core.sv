@@ -65,6 +65,11 @@ module s1_core
   parameter logic [XLEN-1:0] RESET_PC    = BOOT_ADDR,
   parameter logic [XLEN-1:0] HART_ID     = '0,
   parameter int unsigned     PMP_REGIONS = PMP_N,
+  // SPEC 7.2: with this set the decoder marks an unrecognised encoding as an
+  // MXIF candidate instead of illegal.  There is no MXIF port on this core
+  // yet, so a candidate still ends as illegal-instruction (in EX) either way;
+  // the parameter is here so the decode path is already the one SPEC asks for.
+  parameter bit              MXIF_EN     = 1'b0,
   localparam int unsigned    PMP_W       = (PMP_REGIONS > 0) ? PMP_REGIONS : 1,
   localparam int unsigned    PA_W        = PLEN - 2
 ) (
@@ -219,7 +224,9 @@ module s1_core
   logic downstream_busy;
   assign downstream_busy = ex_mem_valid || mem_wb_valid || wb_busy || !sb_empty;
 
-  s1_id u_id (
+  s1_id #(
+    .MXIF_EN (MXIF_EN)
+  ) u_id (
     .clk_i               (clk_i),
     .rst_ni              (rst_ni),
 

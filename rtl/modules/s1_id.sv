@@ -52,7 +52,11 @@
 
 module s1_id
   import s1_pkg::*;
-(
+#(
+  // Passed straight to s1_decode: whether an unrecognised encoding is an MXIF
+  // candidate (SPEC 7.2) or plainly illegal.
+  parameter bit MXIF_EN = 1'b0
+) (
   input  logic                  clk_i,
   input  logic                  rst_ni,
 
@@ -94,7 +98,9 @@ module s1_id
   // ---------------------------------------------------------------------------
   decoded_op_t dec;
 
-  s1_decode u_decode (
+  s1_decode #(
+    .MXIF_EN (MXIF_EN)
+  ) u_decode (
     .instr_i   (fetch_rsp_i.instr),
     .pc_i      (fetch_rsp_i.pc),
     .decoded_o (dec)
@@ -132,11 +138,11 @@ module s1_id
   logic ex_writes;
   assign ex_writes = ex_valid_q && ex_q.op.rd_we && (ex_q.op.rd != '0);
 
-  // The instruction in EX/MEM right now.  `is_load`/`is_amo` travel in
+  // The instruction in EX/MEM right now.  `is_load`/`amo_op` travel in
   // ex_mem_t, so whether its result is final is readable directly.
   logic exmem_writes, exmem_final;
   assign exmem_writes = exmem_valid_i && exmem_i.rd_we && (exmem_i.rd != '0);
-  assign exmem_final  = !exmem_i.is_load && !exmem_i.is_amo;
+  assign exmem_final  = !exmem_i.is_load && (exmem_i.amo_op == AMO_NONE);
 
   logic     need1, need2;
   fwd_src_e src1, src2;
@@ -198,7 +204,7 @@ module s1_id
   // waiting on it.
   // ---------------------------------------------------------------------------
   logic serialise, ser_stall;
-  assign serialise = dec.is_csr || (dec.sys_op != SYS_NONE);
+  assign serialise = (dec.csr_op != CSR_NONE) || (dec.sys_op != SYS_NONE);
   assign ser_stall = serialise && (ex_valid_q || downstream_busy_i);
 
   // ---------------------------------------------------------------------------
@@ -255,7 +261,7 @@ module s1_id
   assign perf_load_use_o     = fetch_rsp_valid_i && (lu1 || lu2);
   assign perf_hazard_stall_o = fetch_rsp_valid_i && (hz_stall || ser_stall);
 
-  // Only rd, rd_we, result, is_load and is_amo are read above; the rest of
+  // Only rd, rd_we, result, is_load and amo_op are read above; the rest of
   // ex_mem_t is on its way to MEM and WB and passes through this stage's
   // sight without being its business.
   logic unused;
