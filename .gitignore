@@ -1,0 +1,10 @@
+# Verilator build output
+obj/
+obj_dir/
+*.vcd
+*.fst
+
+# generator intermediates
+prog.bin
+rv64i.elf
+cmds

@@ -406,9 +406,9 @@ module s1_csr
             end else if (is_pmpcfg) begin
               // A locked entry ignores writes to its own config byte.
               for (int unsigned i = 0; i < 8; i++) begin
-                if (((32'(caddr - CSR_PMPCFG0) * 4) + i) < PMP_REGIONS) begin
-                  if (!pmpcfg_q[(32'(caddr - CSR_PMPCFG0) * 4) + i][7]) begin
-                    pmpcfg_q[(32'(caddr - CSR_PMPCFG0) * 4) + i] <= cdata[i*8 +: 8];
+                if ((((32'(caddr) - 32'(CSR_PMPCFG0)) * 4) + i) < PMP_REGIONS) begin
+                  if (!pmpcfg_q[((32'(caddr) - 32'(CSR_PMPCFG0)) * 4) + i][7]) begin
+                    pmpcfg_q[((32'(caddr) - 32'(CSR_PMPCFG0)) * 4) + i] <= cdata[i*8 +: 8];
                   end
                 end
               end
