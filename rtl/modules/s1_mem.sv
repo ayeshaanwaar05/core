@@ -7,13 +7,14 @@
 // Description  :
 // Takes one instruction per cycle from EX/MEM.  Reads are fetched over I2
 // MEM-REQ and merged byte-wise with pending stores; writes enter a commit-gated
-// store buffer and reach memory only after retire.  PMP is checked by s1_pmp, PMA
-// attributes come from the generated decoder.  Owns the MEM/WB register: a read
-// completes in the cycle its last response arrives.
-// Contract and timing: docs/modules/s1_mem_stage.md.
+// store buffer and reach memory only after retire.  PMP and PMA are answered by
+// checkers outside the core, through the chk_* query.  Owns the MEM/WB register:
+// a read completes in the cycle its last response arrives.
+// Contract and timing: docs/modules/s1_mem.md.
 //
 // Reference: SPEC 7.4, 11, 14; INTERFACES.md 1.5, 2, 9 (P1-P3); RISC-V A, PMP.
-// Testbench: verif/unit/tb_s1_mem_stage.sv.
+// Testbench: core/verif/tb_s1_core.sv (integration; AMO, LR/SC, faults and straddling
+// accesses are not reached by its RV64I program).
 // =============================================================================
 
 module s1_mem
@@ -35,16 +36,17 @@ module s1_mem
   // MEM/WB (CB entries are allocated in ID, so WB never refuses)
   output logic                          wb_valid_o,
   output mem_wb_t                       wb_o,
+  output logic                          wb_pend_o,        // MEM/WB holds a read still owed by the bus
 
   // Completion buffer
-  input  logic [TAG_W-1:0]           oldest_tag_i,   // the oldest in-flight tag (WB, else MEM)
+  input  logic [TAG_W-1:0]           oldest_tag_i,   // oldest in-flight tag: WB's, else MEM's
   input  logic                          sb_commit_i,
   input  logic [TAG_W-1:0]           sb_commit_tag_i,
 
   // ---- Physical-memory checks, both external (SPEC 11) --------------------
   // One query describes the access in MEM; two independent checkers answer it
   // in the same cycle, in parallel with the D$ tag lookup.  Neither is in this
-  // core -- see core5/docs/INTEGRATING.md section 3.
+  // core -- see docs/modules/s1_core.md.
   output logic [XLEN-1:0]               chk_addr_o,
   output logic [2:0]                    chk_size_o,       // log2 bytes
   output logic                          chk_rd_o,         // needs R
@@ -80,7 +82,7 @@ module s1_mem
   localparam int unsigned CNT_W      = $clog2(STORE_BUF_N + 1);
 
   if (STORE_BUF_N < 1) begin : g_bad_sb
-    $error("s1_mem_stage: STORE_BUF_N must be at least 1");
+    $error("s1_mem: STORE_BUF_N must be at least 1");
   end
 
   function automatic logic [WIN_BYTES-1:0] acc_mask(logic [OFF_W-1:0] off, logic [LG_W-1:0] lg);
@@ -408,6 +410,8 @@ module s1_mem
       mw_q.sys_op         <= mem_i.sys_op;
       mw_q.rs1_addr       <= mem_i.rs1_addr;
       mw_q.rs2_addr       <= mem_i.rs2_addr;
+      mw_q.rs1_rdata      <= mem_i.rs1_rdata;
+      mw_q.rs2_rdata      <= mem_i.rs2_rdata;
       mw_q.csr_we         <= mem_i.csr_we;
       mw_q.csr_addr       <= mem_i.csr_addr;
       mw_q.csr_wdata      <= mem_i.csr_wdata;
@@ -498,6 +502,12 @@ module s1_mem
       end
     end
   end
+  // An instruction in MEM/WB that is not completing this cycle.  It is past
+  // EX/MEM, so ID cannot see it there, yet its result does not exist: ID must
+  // stall a consumer of its rd, and treat the pipeline as busy for
+  // serialisation.  Only a read waiting on the bus can be in this state.
+  assign wb_pend_o = mw_valid_q && !mw_done;
+
   assign amo_alloc = wb_valid_o && mw_amox_q && !wb_o.exc;
   assign lr_set    = wb_valid_o && mw_lr_q   && !wb_o.exc;
 
@@ -660,7 +670,8 @@ module s1_mem
                                        : {sb_beat_q[0], sb_off_q[0]};
 
   // id: one outstanding request.  errcode: encoding undefined in I2.  aq/rl
-  // are encoding bits with no MEM behaviour.  X, and pmpcfg[6:5], are not data.
+  // need no action: one access in flight and a FIFO store buffer already
+  // order every access as they ask.  cacheable: no D$ here to bypass.
   logic unused_inputs;
   always_comb begin
     unused_inputs = ^{dmem_rsp_i.id, dmem_rsp_i.errcode, mem_i.aq, mem_i.rl, pma_i.cacheable};

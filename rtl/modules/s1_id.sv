@@ -12,7 +12,7 @@
 // the ID/EX register.  The decode is in s1_decode and every forwarding and
 // stall decision is in s1_hazard; what is left here is the stage's handshake.
 //
-// Reference: SPEC 7.2.  Testbench: simulation/tb_s1_core.sv (integration only).
+// Reference: SPEC 7.2.  Testbench: core/verif/tb_s1_core.sv (integration only).
 // =============================================================================
 
 module s1_id
@@ -44,6 +44,11 @@ module s1_id
   // What is in EX/MEM right now, for the hazard check and for its value
   input  logic                  exmem_valid_i,
   input  ex_mem_t               exmem_i,
+
+  // What is held in MEM/WB, while it is still waiting on the bus
+  input  logic                  memwb_pend_i,
+  input  logic [REG_ADDR_W-1:0] memwb_rd_i,
+  input  logic                  memwb_rd_we_i,
 
   // Is anything still in flight ahead of ID?  Used only for serialisation.
   input  logic                  downstream_busy_i,
@@ -112,6 +117,10 @@ module s1_id
     .exmem_amo_op_i    (exmem_i.amo_op),
     .exmem_result_i    (exmem_i.result),
 
+    .memwb_pend_i      (memwb_pend_i),
+    .memwb_rd_i        (memwb_rd_i),
+    .memwb_rd_we_i     (memwb_rd_we_i),
+
     .downstream_busy_i (downstream_busy_i),
 
     .rs1_fwd_o         (src1),
@@ -152,13 +161,19 @@ module s1_id
     nxt.exctval    = fetch_rsp_i.exctval;
   end
 
+  // Only a WB flush empties the ID/EX register.  EX reads its instruction
+  // straight out of this register, so on a mispredict the register holds the
+  // branch itself: if EX cannot pass it on this cycle (MEM is busy) clearing
+  // it would lose the branch.  `kill` already stops the wrong-path
+  // instruction in ID from issuing, and the branch leaves through the
+  // ex_ready_i arm below once EX fires.
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       ex_valid_q <= 1'b0;
       ex_q       <= '0;
       tag_q      <= '0;
     end else begin
-      if (kill) begin
+      if (flush_i) begin
         ex_valid_q <= 1'b0;
       end else if (issue) begin
         ex_valid_q <= 1'b1;

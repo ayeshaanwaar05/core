@@ -13,7 +13,8 @@
 // and MXIF (SPEC 7.2).  Details: docs/modules/s1_rvc_expand.md.
 //
 // Reference: SPEC 7.1; RISC-V Unprivileged ISA "C" chapter, RV64C.
-// Testbench: verif/unit/tb_s1_rvc_expand.sv.
+// Testbench: exercised through fetch by verif/unit/tb_s1_fetch.sv; not reached
+// by core/verif/tb_s1_core.sv, whose program is RV64I with no compressed code.
 // =============================================================================
 
 module s1_rvc_expand

@@ -11,9 +11,9 @@
 // Resolves operands (SPEC 8.1), executes on s1_alu, resolves branches and
 // redirects fetch on a mispredict, computes load/store addresses and CSR
 // read-modify-write values (committed in WB), and runs MUL and DIV in place.
-// Registers everything else into EX/MEM.  Contract: docs/modules/s1_execute.md.
+// Registers everything else into EX/MEM.  Contract: docs/modules/s1_ex.md.
 //
-// Reference: SPEC 6, 7.3, 8.1, 8.2, 9, 12.  Testbench: verif/unit/tb_s1_execute.sv.
+// Reference: SPEC 6, 7.3, 8.1, 8.2, 9, 12.  Testbench: core/verif/tb_s1_core.sv.
 // =============================================================================
 
 module s1_ex
@@ -37,11 +37,9 @@ module s1_ex
   input  logic [XLEN-1:0]      csr_rdata_i,
   input  logic                 csr_illegal_i,
 
-  // Mispredict: to fetch (flush IF) and ID (flush).  The tag goes with it so a
-  // later owner of the store buffer can tell which stores are younger.
+  // Mispredict: to fetch (flush IF) and ID (block the wrong-path issue)
   output logic                 ex_redirect_valid_o,
   output logic [XLEN-1:0]      ex_redirect_pc_o,
-  output logic [TAG_W-1:0]     ex_redirect_tag_o,
 
   // EX/MEM
   output logic                 mem_valid_o,
@@ -215,7 +213,6 @@ module s1_ex
   // restart fetch every cycle.
   assign ex_redirect_valid_o  = first && !exc && mispredict;
   assign ex_redirect_pc_o     = next_pc;
-  assign ex_redirect_tag_o    = ex_i.tag;
 
   assign perf_br_taken_o      = first && !exc && op.is_branch && cmp_res;
   assign perf_br_mispredict_o = ex_redirect_valid_o;
@@ -239,7 +236,7 @@ module s1_ex
   // "valid, not flushed, and not already busy here".
   assign md_start = is_md && first;
 
-  // The multiplier/divider is external (see core5/docs/INTEGRATING.md 3).
+  // The multiplier/divider is external (docs/modules/s1_core.md).
   // It is not a pipeline unit: `start_o` is this instruction's first EX cycle,
   // EX holds the instruction until `done_i`, and the answer is EX's result.
   assign md_start_o = md_start;
@@ -280,6 +277,8 @@ module s1_ex
     out.sys_op   = op.sys_op;
     out.rs1_addr = op.rs1_re ? op.rs1 : '0;
     out.rs2_addr = op.rs2_re ? op.rs2 : '0;
+    out.rs1_rdata = op.rs1_re ? rs1 : '0;  // after forwarding: what EX used
+    out.rs2_rdata = op.rs2_re ? rs2 : '0;
     out.exc      = exc;
     out.exccode  = exccode;
     out.exctval  = exctval;
@@ -328,9 +327,10 @@ module s1_ex
   assign mem_valid_o = mem_valid_q;
   assign mem_o       = mem_q;
 
-  // Consumed elsewhere: hazard fields (ID), MXIF/CB bookkeeping (CB), and
-  // bits EX derives differently (instr: instr_raw is the mtval source).
+  // cbo_op has no consumer: Zicbom/Zicboz are decoded but not executed, so a
+  // CBO retires as a no-op today.  instr: EX uses instr_raw, the encoding as
+  // fetched, for RVFI and mtval.
   logic unused_op;
-  assign unused_op = ^{op.rs1_re, op.rs2_re, op.cbo_op, op.instr};
+  assign unused_op = ^{op.cbo_op, op.instr};
 
 endmodule

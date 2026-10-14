@@ -18,6 +18,10 @@
 //   in EX/MEM, result final     the value is on exmem_result_i now, so it is
 //                               returned in rs*_val_o with FWD_RF.
 //   in EX/MEM, a load / LR / AMO  stall until MEM has answered.
+//   held in MEM/WB, unfinished  stall.  A read waiting on the D$ sits in the
+//                               MEM/WB register, past EX/MEM, until its last
+//                               response arrives; its value exists nowhere
+//                               yet, and EX/MEM is free behind it.
 //   committing in WB            nothing: s1_regfile already returns a value
 //                               written in the same cycle.
 //
@@ -29,7 +33,7 @@
 //     answer into EX needs EX to hold an operand that is not ready yet.
 //   - No CB source and no CB-full stall: this core has no completion buffer.
 //
-// Reference: SPEC 7.2, 8.1, 8.2.  Testbench: simulation/tb_s1_hazard.sv.
+// Reference: SPEC 7.2, 8.1, 8.2.  Testbench: core/verif/tb_s1_hazard.sv.
 // =============================================================================
 
 module s1_hazard
@@ -58,6 +62,11 @@ module s1_hazard
   input  logic                  exmem_is_load_i,
   input  amo_op_e               exmem_amo_op_i,
   input  logic [XLEN-1:0]       exmem_result_i,
+
+  // The instruction in MEM/WB, only while it is NOT completing this cycle
+  input  logic                  memwb_pend_i,
+  input  logic [REG_ADDR_W-1:0] memwb_rd_i,
+  input  logic                  memwb_rd_we_i,
 
   // Anything in flight past the ID/EX register; serialisation only
   input  logic                  downstream_busy_i,
@@ -92,8 +101,15 @@ module s1_hazard
   assign exmem_writes = exmem_valid_i && exmem_rd_we_i && (exmem_rd_i != '0);
   assign exmem_final  = !exmem_is_load_i && (exmem_amo_op_i == AMO_NONE);
 
-  // Written once and called twice so the two operands cannot drift apart.  EX
-  // is checked before EX/MEM: it holds the younger producer.
+  // Never final: anything in MEM/WB that is not completing is a read waiting
+  // on the bus.  Once it completes, WB writes s1_regfile in that same cycle and
+  // the register file's own bypass returns the value.
+  logic memwb_writes;
+  assign memwb_writes = memwb_pend_i && memwb_rd_we_i && (memwb_rd_i != '0);
+
+  // Written once and called twice so the two operands cannot drift apart.
+  // Youngest producer first -- EX, then EX/MEM, then MEM/WB -- because the
+  // youngest write to a register is the one the operand must see.
   function automatic resolved_t resolve(input logic                  re,
                                         input logic [REG_ADDR_W-1:0] addr,
                                         input logic [XLEN-1:0]       rf_val,
@@ -103,7 +119,9 @@ module s1_hazard
                                         input logic                  exmem_wr,
                                         input logic                  exmem_fin,
                                         input logic [REG_ADDR_W-1:0] exmem_rd,
-                                        input logic [XLEN-1:0]       exmem_val);
+                                        input logic [XLEN-1:0]       exmem_val,
+                                        input logic                  memwb_wr,
+                                        input logic [REG_ADDR_W-1:0] memwb_rd);
     resolved_t r;
     logic      need;
     need    = re && (addr != '0);
@@ -116,6 +134,8 @@ module s1_hazard
     end else if (need && exmem_wr && (exmem_rd == addr)) begin
       if (exmem_fin) r.val   = exmem_val;
       else           r.stall = 1'b1;
+    end else if (need && memwb_wr && (memwb_rd == addr)) begin
+      r.stall = 1'b1;
     end
     return r;
   endfunction
@@ -123,9 +143,11 @@ module s1_hazard
   resolved_t r1, r2;
 
   assign r1 = resolve(rs1_re_i, rs1_addr_i, rs1_rf_i, ex_writes, ex_final, ex_rd_i,
-                      exmem_writes, exmem_final, exmem_rd_i, exmem_result_i);
+                      exmem_writes, exmem_final, exmem_rd_i, exmem_result_i,
+                      memwb_writes, memwb_rd_i);
   assign r2 = resolve(rs2_re_i, rs2_addr_i, rs2_rf_i, ex_writes, ex_final, ex_rd_i,
-                      exmem_writes, exmem_final, exmem_rd_i, exmem_result_i);
+                      exmem_writes, exmem_final, exmem_rd_i, exmem_result_i,
+                      memwb_writes, memwb_rd_i);
 
   assign rs1_fwd_o = r1.src;
   assign rs1_val_o = r1.val;

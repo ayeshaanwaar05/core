@@ -6,14 +6,14 @@
 // Author(s)    : integration (Oct,2026)
 // Modified By  :
 //
-// s1_core      : S1-Core -- RV64IMAC, classic 5-stage, in order     [COMPLETE]
+// s1_core      : S1-Core -- RV64IMAC, classic 5-stage, in order  [WIP -- T-02]
 // Description  :
 //
 //   IF  ->  ID  ->  EX  ->  MEM  ->  WB
 //
 // Single issue, in-order issue, **in-order completion**, one instruction
 // committed per cycle in WB.  `RV64IMAC_Zicsr_Zifencei`, machine and user
-// mode, 16 PMP regions.
+// mode; the CSR file, PMP and counters are outside the core.
 //
 // There is no completion buffer, no coprocessor port, and no multi-cycle unit
 // hanging off the side of the pipeline.  MUL and DIV run inside EX and stall
@@ -34,7 +34,13 @@
 //   imem_*, dmem_*     I2 MEM-REQ.  valid/ready, payload stable until accepted,
 //                      `valid` never a function of `ready`.  One request
 //                      outstanding per port.  Put your I$ and D$ here.
-//   irq_i              I7.  CLINT drives timer and software, PLIC external.
+//   csr_*, trap_*,     the CSR file -- OUTSIDE this core (it is another
+//   mret_o, priv_*,    project's).  EX queries it (side-effect free), WB
+//   irq_*, instret_o,  commits to it, asks it to take traps and xRET, and it
+//   perf_*_o           answers with the vector, mepc, the privilege mode and
+//                      any pending interrupt (already masked, I7).  It owns
+//                      the PMP CSRs and the counters, fed by instret_o and
+//                      the perf_*_o event lines.
 //   rvfi_o             I6.  One committed instruction per cycle; this is what
 //                      Spike co-simulation reads.
 //   fence_i_o          asserted for one cycle when FENCE.I commits: invalidate
@@ -43,17 +49,16 @@
 //                      Imprecise by construction -- raise it as a machine
 //                      check at the platform level.
 //   chk_*, pma_*,      the PMA and PMP checks.  Both are OUTSIDE this core;
-//   pmp_allow_i,       it asks, you answer in the same cycle.  PMP's
-//   pmpcfg_o,          configuration CSRs stay here and are exported for your
-//   pmpaddr_o          checker to read.
+//   pmp_allow_i        it asks, you answer in the same cycle.  The PMP
+//                      configuration comes from the CSR file, not from here.
 //   md_*               RV64M.  Also outside: EX stalls on it, so it needs no
 //                      tag and cannot complete out of order.
 //
-// Reference implementations of all three are in core5/stubs/ -- good enough to
-// run the tests, not good enough to ship.  Replace them, do not extend them.
-//
-// What is deliberately absent, and what adding it back would cost, is written
-// down in core5/docs/INTEGRATING.md rather than guessed at here.
+// core/verif/tb_s1_core.sv models memory behind imem/dmem, answers the PMA/PMP
+// query permissively, ties md_* off, stands in for the CSR file with a minimal
+// model (verif/tb_csr_model.sv), and runs every RV64I instruction against
+// spike.  What is deliberately absent, and where this core departs
+// from the SPEC, is written down in docs/modules/s1_core.md.
 // -----------------------------------------------------------------------------
 //
 // Reference: SPEC 6, 7, 8, 10-12; INTERFACES.md I2, I6, I7.
@@ -63,15 +68,11 @@ module s1_core
   import s1_pkg::*;
 #(
   parameter logic [XLEN-1:0] RESET_PC    = BOOT_ADDR,
-  parameter logic [XLEN-1:0] HART_ID     = '0,
-  parameter int unsigned     PMP_REGIONS = PMP_N,
   // SPEC 7.2: with this set the decoder marks an unrecognised encoding as an
   // MXIF candidate instead of illegal.  There is no MXIF port on this core
   // yet, so a candidate still ends as illegal-instruction (in EX) either way;
   // the parameter is here so the decode path is already the one SPEC asks for.
-  parameter bit              MXIF_EN     = 1'b0,
-  localparam int unsigned    PMP_W       = (PMP_REGIONS > 0) ? PMP_REGIONS : 1,
-  localparam int unsigned    PA_W        = PLEN - 2
+  parameter bit              MXIF_EN     = 1'b0
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -92,9 +93,6 @@ module s1_core
   output logic            dmem_rsp_ready_o,
   input  mem_rsp_t        dmem_rsp_i,
 
-  // ---- Interrupts (INTERFACES.md I7) --------------------------------------
-  input  irq_t            irq_i,
-
   // ---- Zifencei to the caches ---------------------------------------------
   output logic            fence_i_o,
 
@@ -105,7 +103,7 @@ module s1_core
   // ---- Physical-memory checks — EXTERNAL (SPEC 11) ------------------------
   // One query per data access, answered combinationally in the same cycle.
   // Two independent checkers, deliberately: PMA comes from soc.yaml, PMP from
-  // the CSRs below.  Reference implementations live in core5/stubs/.
+  // the CSRs below.
   output logic [XLEN-1:0]     chk_addr_o,
   output logic [2:0]          chk_size_o,       // log2 bytes
   output logic                chk_rd_o,
@@ -116,10 +114,6 @@ module s1_core
   input  logic                pma_fault_i,
   input  logic                pmp_allow_i,
 
-  // PMP configuration stays core-owned, because it is architectural CSR state
-  // (SPEC 11).  The checker reads it from here.
-  output logic [PMP_W-1:0][7:0]      pmpcfg_o,
-  output logic [PMP_W-1:0][PA_W-1:0] pmpaddr_o,
 
   // ---- RV64M multiply / divide — EXTERNAL (SPEC 2.1) ----------------------
   // Not a pipeline unit: EX asserts `start` in the instruction's first EX
@@ -132,6 +126,38 @@ module s1_core
   output logic                md_flush_o,
   input  logic                md_done_i,
   input  logic [XLEN-1:0]     md_result_i,
+
+  // ---- CSR file -- EXTERNAL (SPEC 10) --------------------------------------
+  // Query from EX: side-effect free, answered combinationally.
+  output logic [11:0]         csr_addr_o,
+  output logic                csr_re_o,
+  output logic                csr_we_o,
+  input  logic [XLEN-1:0]     csr_rdata_i,
+  input  logic                csr_illegal_i,
+  // The only write, from WB, never speculative.
+  output csr_upd_t            csr_commit_o,
+  // Traps and xRET, from WB; trap_vec_i may depend combinationally on
+  // trap_req_o (vectored interrupts).
+  output trap_req_t           trap_req_o,
+  output logic                mret_o,
+  input  logic [XLEN-1:0]     trap_vec_i,
+  input  logic [XLEN-1:0]     mepc_i,
+  // Privilege: current, and effective for loads/stores (after MPRV).
+  input  priv_lvl_e           priv_i,
+  input  priv_lvl_e           priv_data_i,
+  // A pending, enabled interrupt, already prioritised by the CSR file.
+  input  logic                irq_valid_i,
+  input  logic [5:0]          irq_code_i,
+  // Counters: one instruction retired (not trapped), and the event lines.
+  output logic                instret_o,
+  output logic                perf_br_taken_o,
+  output logic                perf_br_mispredict_o,
+  output logic                perf_load_retired_o,
+  output logic                perf_store_retired_o,
+  output logic                perf_sb_full_o,
+  output logic                perf_muldiv_stall_o,
+  output logic                perf_load_use_o,
+  output logic                perf_hazard_stall_o,
 
   // ---- RVFI trace (INTERFACES.md I6) --------------------------------------
   output rvfi_t           rvfi_o
@@ -149,44 +175,27 @@ module s1_core
   logic        ex_mem_valid, ex_mem_ready;
   ex_mem_t     ex_mem;
 
-  logic        mem_wb_valid;
+  logic        mem_wb_valid, mem_wb_pend;
   mem_wb_t     mem_wb;
 
   localparam int unsigned RF_N_READ = 2;   // rs1, rs2
   logic [REG_ADDR_W-1:0] rf_rs1_addr, rf_rs2_addr;
-  logic [REG_ADDR_W-1:0] rf_raddr [RF_N_READ];
-  logic [XLEN-1:0]       rf_rdata [RF_N_READ];
+  logic [RF_N_READ-1:0][REG_ADDR_W-1:0] rf_raddr;
+  logic [RF_N_READ-1:0][XLEN-1:0]       rf_rdata;
   rf_wr_t                rf_wr;
 
   logic                  wb_flush, wb_redirect_valid, wb_busy;
   logic [XLEN-1:0]       wb_redirect_pc;
   flush_cause_e          wb_flush_cause;
-  csr_upd_t              csr_commit;
-  logic                  instret;
   logic                  sb_commit;
   logic [TAG_W-1:0]      sb_commit_tag;
 
   logic                  ex_redirect_valid;
   logic [XLEN-1:0]       ex_redirect_pc;
-  logic [TAG_W-1:0]      ex_redirect_tag;
 
-  logic [11:0]           csr_addr;
-  logic                  csr_re, csr_we;
-  logic [XLEN-1:0]       csr_rdata;
-  logic                  csr_illegal;
-  trap_req_t             trap_req;
-  logic                  mret;
-  logic [XLEN-1:0]       trap_vec, mepc;
-  priv_lvl_e             priv, priv_data;
-  logic                  irq_valid;
-  logic [5:0]            irq_code;
 
-  logic            sb_empty, sb_full;
+  logic            sb_empty;
 
-  logic            perf_br_taken, perf_br_mispredict, perf_muldiv_stall;
-  logic            perf_load_retired, perf_store_retired;
-  logic            perf_load_use, perf_hazard_stall;
-  logic [PERF_N-1:0] perf;
 
   logic [63:0]     order_q;
 
@@ -203,7 +212,7 @@ module s1_core
     .ex_redirect_pc_i        (ex_redirect_pc),
     .retire_redirect_valid_i (wb_redirect_valid),
     .retire_redirect_pc_i    (wb_redirect_pc),
-    .priv_i                  (priv),
+    .priv_i                  (priv_i),
 
     .imem_req_valid_o        (imem_req_valid_o),
     .imem_req_ready_i        (imem_req_ready_i),
@@ -225,9 +234,12 @@ module s1_core
   // ===========================================================================
 
   // ID serialises CSR and system instructions on an empty pipeline.  "Empty"
-  // is everything downstream of the ID/EX register, which ID checks itself.
+  // is everything downstream of the ID/EX register, which ID checks itself --
+  // including a read still waiting in MEM/WB, which mem_wb_valid does not
+  // show until the cycle it completes.
   logic downstream_busy;
-  assign downstream_busy = ex_mem_valid || mem_wb_valid || wb_busy || !sb_empty;
+  assign downstream_busy = ex_mem_valid || mem_wb_pend || mem_wb_valid || wb_busy
+                        || !sb_empty;
 
   s1_id #(
     .MXIF_EN (MXIF_EN)
@@ -248,21 +260,25 @@ module s1_core
     .exmem_valid_i       (ex_mem_valid),
     .exmem_i             (ex_mem),
 
+    .memwb_pend_i        (mem_wb_pend),
+    .memwb_rd_i          (mem_wb.rd),
+    .memwb_rd_we_i       (mem_wb.rd_we),
+
     .downstream_busy_i   (downstream_busy),
 
     .ex_valid_o          (id_ex_valid),
     .ex_ready_i          (id_ex_ready),
     .ex_o                (id_ex),
 
-    .perf_load_use_o     (perf_load_use),
-    .perf_hazard_stall_o (perf_hazard_stall)
+    .perf_load_use_o     (perf_load_use_o),
+    .perf_hazard_stall_o (perf_hazard_stall_o)
   );
 
   // The read is registered (meds_s1_sram, R-C5): fetch presents the addresses
-  // of the instruction about to enter ID, and the data is there with it.  The
-  // array is assigned whole, not by element -- see the Makefile on Verilator
-  // 5.020 and unpacked-array input ports.
-  assign rf_raddr = '{rf_rs1_addr, rf_rs2_addr};
+  // of the instruction about to enter ID, and the data is there with it.
+  // Port 0 is rs1, port 1 is rs2.
+  assign rf_raddr[0] = rf_rs1_addr;
+  assign rf_raddr[1] = rf_rs2_addr;
 
   s1_regfile #(
     .N_READ (RF_N_READ)
@@ -284,21 +300,20 @@ module s1_core
     .rst_ni               (rst_ni),
 
     .flush_i              (wb_flush),
-    .priv_i               (priv),
+    .priv_i               (priv_i),
 
     .ex_valid_i           (id_ex_valid),
     .ex_ready_o           (id_ex_ready),
     .ex_i                 (id_ex),
 
-    .csr_addr_o           (csr_addr),
-    .csr_re_o             (csr_re),
-    .csr_we_o             (csr_we),
-    .csr_rdata_i          (csr_rdata),
-    .csr_illegal_i        (csr_illegal),
+    .csr_addr_o           (csr_addr_o),
+    .csr_re_o             (csr_re_o),
+    .csr_we_o             (csr_we_o),
+    .csr_rdata_i          (csr_rdata_i),
+    .csr_illegal_i        (csr_illegal_i),
 
     .ex_redirect_valid_o  (ex_redirect_valid),
     .ex_redirect_pc_o     (ex_redirect_pc),
-    .ex_redirect_tag_o    (ex_redirect_tag),
 
     .mem_valid_o          (ex_mem_valid),
     .mem_ready_i          (ex_mem_ready),
@@ -312,9 +327,9 @@ module s1_core
     .md_done_i            (md_done_i),
     .md_result_i          (md_result_i),
 
-    .perf_br_taken_o      (perf_br_taken),
-    .perf_br_mispredict_o (perf_br_mispredict),
-    .perf_muldiv_stall_o  (perf_muldiv_stall)
+    .perf_br_taken_o      (perf_br_taken_o),
+    .perf_br_mispredict_o (perf_br_mispredict_o),
+    .perf_muldiv_stall_o  (perf_muldiv_stall_o)
   );
 
   // ===========================================================================
@@ -379,7 +394,7 @@ module s1_core
     .rst_ni           (rst_ni),
 
     .flush_i          (mem_flush_q),
-    .priv_i           (priv_data),
+    .priv_i           (priv_data_i),
 
     .mem_valid_i      (ex_mem_valid),
     .mem_ready_o      (ex_mem_ready),
@@ -387,6 +402,7 @@ module s1_core
 
     .wb_valid_o       (mem_wb_valid),
     .wb_o             (mem_wb),
+    .wb_pend_o        (mem_wb_pend),
 
     .oldest_tag_i     (oldest_tag),
     .sb_commit_i      (sb_commit_q),
@@ -409,13 +425,13 @@ module s1_core
     .dmem_rsp_i       (dmem_rsp_i),
 
     .sb_empty_o       (sb_empty),
-    .sb_full_o        (sb_full),
+    .sb_full_o        (perf_sb_full_o),
     .store_err_o      (store_err_o),
     .store_err_addr_o (store_err_addr_o)
   );
 
   // The core never fetches through the check port today, so `ex` is tied low.
-  // Closing that gap (core5/docs/INTEGRATING.md G2) means giving s1_fetch its
+  // Closing that gap (docs/modules/s1_core.md) means giving s1_fetch its
   // own query rather than changing this one.
   assign chk_ex_o = 1'b0;
 
@@ -426,14 +442,14 @@ module s1_core
     .wb_valid_i           (mem_wb_valid),
     .wb_i                 (mem_wb),
 
-    .irq_valid_i          (irq_valid),
-    .irq_code_i           (irq_code),
+    .irq_valid_i          (irq_valid_i),
+    .irq_code_i           (irq_code_i),
 
     .sb_empty_i           (sb_empty),
 
     .rf_wr_o              (rf_wr),
-    .csr_commit_o         (csr_commit),
-    .instret_o            (instret),
+    .csr_commit_o         (csr_commit_o),
+    .instret_o            (instret_o),
 
     .sb_commit_o          (sb_commit),
     .sb_commit_tag_o      (sb_commit_tag),
@@ -443,80 +459,29 @@ module s1_core
     .redirect_valid_o     (wb_redirect_valid),
     .redirect_pc_o        (wb_redirect_pc),
 
-    .trap_req_o           (trap_req),
-    .mret_o               (mret),
-    .trap_vec_i           (trap_vec),
-    .mepc_i               (mepc),
+    .trap_req_o           (trap_req_o),
+    .mret_o               (mret_o),
+    .trap_vec_i           (trap_vec_i),
+    .mepc_i               (mepc_i),
 
     .busy_o               (wb_busy),
 
+    .priv_i               (priv_i),
     .order_i              (order_q),
     .rvfi_o               (rvfi_o),
 
-    .perf_load_retired_o  (perf_load_retired),
-    .perf_store_retired_o (perf_store_retired)
+    .perf_load_retired_o  (perf_load_retired_o),
+    .perf_store_retired_o (perf_store_retired_o)
   );
 
   // RVFI's instruction counter.  Kept here rather than in the combinational
-  // WB stage, which holds no state of its own.
+  // WB stage, which holds no state of its own.  It counts every RVFI record,
+  // trapped ones included, which is why it is not `instret`.
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni)        order_q <= '0;
-    else if (instret)   order_q <= order_q + 64'd1;
+    if (!rst_ni)             order_q <= '0;
+    else if (rvfi_o.valid)   order_q <= order_q + 64'd1;
   end
 
   assign fence_i_o = (wb_flush_cause == FLUSH_FENCE_I);
-
-  // ===========================================================================
-  // CSR file, privilege and traps
-  // ===========================================================================
-  assign perf[EV_BR_TAKEN      - 1] = perf_br_taken;
-  assign perf[EV_BR_MISPREDICT - 1] = perf_br_mispredict;
-  assign perf[EV_LOAD_RETIRED  - 1] = perf_load_retired;
-  assign perf[EV_STORE_RETIRED - 1] = perf_store_retired;
-  assign perf[EV_SB_FULL       - 1] = sb_full;
-  assign perf[EV_MULDIV_STALL  - 1] = perf_muldiv_stall;
-  assign perf[EV_LOAD_USE      - 1] = perf_load_use;
-  assign perf[EV_HAZARD_STALL  - 1] = perf_hazard_stall;
-
-  s1_csr #(
-    .PMP_REGIONS (PMP_REGIONS),
-    .HART_ID     (HART_ID)
-  ) u_csr (
-    .clk_i         (clk_i),
-    .rst_ni        (rst_ni),
-
-    .csr_addr_i    (csr_addr),
-    .csr_re_i      (csr_re),
-    .csr_we_i      (csr_we),
-    .csr_rdata_o   (csr_rdata),
-    .csr_illegal_o (csr_illegal),
-
-    .commit_i      (csr_commit),
-
-    .trap_req_i    (trap_req),
-    .mret_i        (mret),
-    .trap_vec_o    (trap_vec),
-    .mepc_o        (mepc),
-
-    .priv_o        (priv),
-    .priv_data_o   (priv_data),
-
-    .irq_i         (irq_i),
-    .irq_valid_o   (irq_valid),
-    .irq_code_o    (irq_code),
-
-    .pmpcfg_o      (pmpcfg_o),
-    .pmpaddr_o     (pmpaddr_o),
-
-    .instret_i     (instret),
-    .perf_i        (perf)
-  );
-
-  // EX reports which instruction its redirect belongs to.  Nothing downstream
-  // needs it in an in-order pipeline -- the flush of ID and IF is the whole
-  // effect -- but it is the natural hook for a store buffer that one day has
-  // to discard younger entries, so EX keeps driving it.
-  logic unused;
-  assign unused = ^{ex_redirect_tag};
 
 endmodule

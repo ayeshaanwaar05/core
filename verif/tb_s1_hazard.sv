@@ -16,9 +16,10 @@ module tb_s1_hazard
 
   localparam int unsigned N_RANDOM = 5000;
 
-  logic [REG_ADDR_W-1:0] rs1_addr, rs2_addr, ex_rd, exmem_rd;
+  logic [REG_ADDR_W-1:0] rs1_addr, rs2_addr, ex_rd, exmem_rd, memwb_rd;
   logic                  rs1_re, rs2_re, ex_valid, ex_rd_we;
   logic                  exmem_valid, exmem_rd_we, exmem_is_load, busy;
+  logic                  memwb_pend, memwb_rd_we;
   logic [XLEN-1:0]       rs1_rf, rs2_rf, exmem_result;
   csr_op_e               csr_op;
   sys_op_e               sys_op;
@@ -48,6 +49,9 @@ module tb_s1_hazard
     .exmem_is_load_i   (exmem_is_load),
     .exmem_amo_op_i    (exmem_amo_op),
     .exmem_result_i    (exmem_result),
+    .memwb_pend_i      (memwb_pend),
+    .memwb_rd_i        (memwb_rd),
+    .memwb_rd_we_i     (memwb_rd_we),
     .downstream_busy_i (busy),
     .rs1_fwd_o         (rs1_fwd),
     .rs1_val_o         (rs1_val),
@@ -78,6 +82,7 @@ module tb_s1_hazard
     exmem_valid = 1'b0;  exmem_rd = '0;  exmem_rd_we = 1'b0;
     exmem_is_load = 1'b0;  exmem_amo_op = AMO_NONE;
     exmem_result = XLEN'(64'hABCD);
+    memwb_pend = 1'b0;  memwb_rd = '0;  memwb_rd_we = 1'b0;
     busy = 1'b0;
   endtask
 
@@ -114,6 +119,8 @@ module tb_s1_hazard
         if (unit_final(ex_unit)) f = FWD_EXMEM; else st = 1'b1;
       end else if (exmem_valid && exmem_rd_we && exmem_rd != '0 && exmem_rd == a) begin
         if (!exmem_is_load && exmem_amo_op == AMO_NONE) v = exmem_result; else st = 1'b1;
+      end else if (memwb_pend && memwb_rd_we && memwb_rd != '0 && memwb_rd == a) begin
+        st = 1'b1;
       end
     end
   endtask
@@ -168,6 +175,25 @@ module tb_s1_hazard
     exmem_amo_op = AMO_ADD;
     expect_out("EXMEM amoadd -> rs2", FWD_RF, '0, FWD_RF, '0, 1'b1, 1'b1);
 
+    // -- a read still waiting in MEM/WB: past EX/MEM, value not there yet ------
+    idle();  memwb_pend = 1'b1;  memwb_rd_we = 1'b1;  memwb_rd = 5'd5;
+    expect_out("MEMWB pending -> rs1", FWD_RF, '0, FWD_RF, '0, 1'b1, 1'b1);
+    memwb_rd = 5'd6;
+    expect_out("MEMWB pending -> rs2", FWD_RF, '0, FWD_RF, '0, 1'b1, 1'b1);
+    memwb_pend = 1'b0;
+    expect_out("MEMWB completing", FWD_RF, rs1_rf, FWD_RF, rs2_rf, 1'b0, 1'b0);
+    memwb_pend = 1'b1;  memwb_rd_we = 1'b0;
+    expect_out("MEMWB no rd_we", FWD_RF, rs1_rf, FWD_RF, rs2_rf, 1'b0, 1'b0);
+    memwb_rd_we = 1'b1;  memwb_rd = '0;  rs1_addr = '0;
+    expect_out("MEMWB x0", FWD_RF, rs1_rf, FWD_RF, rs2_rf, 1'b0, 1'b0);
+    // a younger, final producer of the same register wins over the waiting load
+    idle();  memwb_pend = 1'b1;  memwb_rd_we = 1'b1;  memwb_rd = 5'd5;
+    exmem_valid = 1'b1;  exmem_rd_we = 1'b1;  exmem_rd = 5'd5;
+    expect_out("EXMEM beats MEMWB", FWD_RF, exmem_result, FWD_RF, rs2_rf, 1'b0, 1'b0);
+    idle();  memwb_pend = 1'b1;  memwb_rd_we = 1'b1;  memwb_rd = 5'd5;
+    ex_valid = 1'b1;  ex_rd_we = 1'b1;  ex_rd = 5'd5;
+    expect_out("EX beats MEMWB", FWD_EXMEM, '0, FWD_RF, rs2_rf, 1'b0, 1'b0);
+
     // -- both stages write the same register: EX holds the younger one ----------
     idle();
     ex_valid = 1'b1;     ex_rd_we = 1'b1;     ex_rd = 5'd5;     ex_unit = UNIT_ALU;
@@ -199,6 +225,8 @@ module tb_s1_hazard
       rs2_addr = REG_ADDR_W'($urandom_range(0, 3));
       ex_rd    = REG_ADDR_W'($urandom_range(0, 3));
       exmem_rd = REG_ADDR_W'($urandom_range(0, 3));
+      memwb_rd = REG_ADDR_W'($urandom_range(0, 3));
+      memwb_pend = 1'($urandom);  memwb_rd_we = 1'($urandom);
       rs1_re = 1'($urandom);  rs2_re = 1'($urandom);
       rs1_rf = {$urandom, $urandom};  rs2_rf = {$urandom, $urandom};
       exmem_result = {$urandom, $urandom};

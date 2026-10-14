@@ -1,15 +1,10 @@
 # Verilator build output
 obj/
 obj_dir/
+obj*.log
 *.vcd
 *.fst
 
-# generator intermediates -- simulation/prog.svh IS committed
-simulation/*.elf
-simulation/*.bin
-simulation/cmds
-
-# stray intermediates if gen.py is ever run from the repo root
-/*.elf
-/*.bin
-/cmds
+# generator intermediates -- verif/prog_*.svh and *.hex ARE committed
+verif/*.elf
+verif/*.bin

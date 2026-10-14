@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // =============================================================================
-// s1_decode : ID-stage instruction decoder                           [COMPLETE]
+// s1_decode : ID-stage instruction decoder                      [WIP -- T-02]
 //
 // Purely combinational.  Takes one 32-bit, already-C-expanded instruction
 // (SPEC section 7.1, everything downstream of IF/ID sees only 32-bit
 // encodings) and produces one decoded_op_t control bundle (s1_pkg.sv).
 //
-// Reference: SPEC section 7.2.  Testbench: verif/unit/tb_s1_decode.sv.
+// Reference: SPEC section 7.2.  Testbench: core/verif/tb_s1_core.sv -- every RV64I encoding;
+// RV64M, RV64A, Zicbom/Zicboz and SYSTEM beyond ECALL/EBREAK/MRET are not covered.
 // =============================================================================
 
 module s1_decode

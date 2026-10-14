@@ -6,7 +6,7 @@
 // Author(s)    : integration (Oct,2026)
 // Modified By  :
 //
-// s1_wb        : WB stage -- the architectural commit point        [COMPLETE]
+// s1_wb        : WB stage -- the architectural commit point   [WIP -- T-02]
 // Description  :
 // Combinational.  The MEM/WB register lives inside s1_mem, so by the time an
 // instruction reaches here it is finished; this stage decides what its arrival
@@ -31,7 +31,8 @@
 // Interrupts are taken here too, in place of a commit, so mepc names an
 // instruction that has not executed.
 //
-// Reference: SPEC 7.5, 10.3, 28.2.  Testbench: verif/unit/tb_s1_wb.sv.
+// Reference: SPEC 7.5, 10.3, 28.2.  Testbench: core/verif/tb_s1_core.sv (integration;
+// interrupts are not yet exercised).
 // =============================================================================
 
 module s1_wb
@@ -51,7 +52,7 @@ module s1_wb
   // ---- Architectural state -------------------------------------------------
   output rf_wr_t                rf_wr_o,
   output csr_upd_t              csr_commit_o,
-  output logic                  instret_o,
+  output logic                  instret_o,      // minstret: retired, not trapped
 
   output logic                  sb_commit_o,
   output logic [TAG_W-1:0]      sb_commit_tag_o,
@@ -72,6 +73,7 @@ module s1_wb
   output logic                  busy_o,
 
   // ---- Trace ---------------------------------------------------------------
+  input  priv_lvl_e             priv_i,         // the mode the committing instruction ran in
   input  logic [63:0]           order_i,
   output rvfi_t                 rvfi_o,
 
@@ -165,7 +167,11 @@ module s1_wb
   assign sb_commit_o     = commit && wb_i.sb_alloc;
   assign sb_commit_tag_o = wb_i.tag;
 
-  assign instret_o = commit_ok;
+  // A trapping instruction does not retire, so it does not count (RISC-V
+  // privileged spec, minstret; ECALL and EBREAK "are not considered to
+  // retire").  RVFI still reports it, with rvfi_trap set, and its rvfi_order
+  // still advances -- that counter is s1_core's, driven by rvfi_o.valid.
+  assign instret_o = commit;
 
   assign perf_load_retired_o  = commit && (wb_i.mem_rmask != '0);
   assign perf_store_retired_o = commit && (wb_i.mem_wmask != '0);
@@ -182,18 +188,20 @@ module s1_wb
     rvfi_o.trap      = wb_i.exc;
     rvfi_o.halt      = 1'b0;
     rvfi_o.intr      = 1'b0;
-    rvfi_o.mode      = PRIV_M;
+    // Privilege changes only when a trap or xRET commits, and that flushes
+    // everything younger, so the current mode is the committing instruction's.
+    rvfi_o.mode      = priv_i;
     rvfi_o.ixl       = 2'd2;                      // XLEN = 64
     rvfi_o.rs1_addr  = wb_i.rs1_addr;
     rvfi_o.rs2_addr  = wb_i.rs2_addr;
-    // rs1_rdata/rs2_rdata: ex_mem_t does not carry the resolved operands, as
-    // docs/modules/s1_execute.md records.  See INTEGRATION_NOTES.md G3.
-    rvfi_o.rs1_rdata = '0;
-    rvfi_o.rs2_rdata = '0;
+    rvfi_o.rs1_rdata = wb_i.rs1_rdata;
+    rvfi_o.rs2_rdata = wb_i.rs2_rdata;
     rvfi_o.rd_addr   = rf_wr_o.we ? wb_i.rd     : '0;
     rvfi_o.rd_wdata  = rf_wr_o.we ? wb_i.result : '0;
     rvfi_o.pc_rdata  = wb_i.pc;
-    rvfi_o.pc_wdata  = wb_i.exc ? trap_vec_i : wb_i.next_pc;
+    // Wherever the next instruction comes from: the trap vector, xepc for an
+    // xRET, otherwise the successor EX resolved.
+    rvfi_o.pc_wdata  = redirect_valid_o ? redirect_pc_o : wb_i.next_pc;
     rvfi_o.mem.addr  = wb_i.mem_addr;
     rvfi_o.mem.rmask = wb_i.mem_rmask;
     rvfi_o.mem.wmask = wb_i.mem_wmask;

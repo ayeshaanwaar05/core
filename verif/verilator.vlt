@@ -1,0 +1,30 @@
+`verilator_config
+// Copyright 2026 Maktab-e-Digital Systems Lahore.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Lint waivers for core/ -- every one of them, each with its reason
+// (CODING_STANDARD.md R-L2).  Scoped by file, so a testbench waiver never
+// silences the same warning in the RTL.
+//
+// Two gotchas when editing this file (as in the repository's own):
+//   * the config directive must be the very first line.
+//   * A comment must not begin with the tool's own name, or it is parsed as a
+//     metacomment and becomes a syntax error.
+
+// s1_pkg is a package of shared constants and types.  Any single module uses a
+// subset of it; that is the point of a shared package, not a defect.
+lint_off -rule UNUSEDPARAM -file "*rtl/pkg/s1_pkg.sv"
+
+// Testbenches declare every port of the DUT and read only the ones they check.
+lint_off -rule UNUSEDSIGNAL -file "*verif/tb_*.sv"
+
+// A scoreboard counts and compares inside a clocked block, where blocking
+// assignment is the correct idiom, not a race.
+lint_off -rule BLKSEQ -file "*verif/tb_*.sv"
+
+// The testbench drives reset from an initial block while the DUT uses it
+// asynchronously -- that is what reset looks like from outside the core.
+lint_off -rule SYNCASYNCNET -file "*verif/tb_*.sv"
+
+// Stimulus and checks deliberately widen narrow fields to XLEN to compare them.
+lint_off -rule WIDTHEXPAND -file "*verif/tb_*.sv"

@@ -155,9 +155,9 @@ package s1_pkg;
 
   // ---------------------------------------------------------------------------
   // decoded_op_t -- ID-stage control bundle (SPEC 7.2). Produced only by
-  // s1_decode.sv; consumed by s1_regfile, s1_alu, s1_lsu, s1_csr, and
-  // s1_completion_buffer. Carries no register values and no privilege
-  // checks -- those belong to s1_regfile.sv and s1_csr.sv respectively.
+  // s1_decode.sv; consumed by s1_hazard (via s1_id) and s1_ex. Carries no
+  // register values and no privilege checks -- those belong to s1_regfile.sv
+  // and the (external) CSR file respectively.
   // ---------------------------------------------------------------------------
   typedef struct packed {
     // -- classification ------------------------------------------------------
@@ -200,7 +200,7 @@ package s1_pkg;
     // -- multiply / divide: unit==UNIT_MUL or UNIT_DIV ------------------------------
     muldiv_op_e             muldiv_op;
 
-    // -- CSR (Zicsr), consumed by s1_csr.sv: csr_op != CSR_NONE ---------------------
+    // -- CSR (Zicsr), for the external CSR file: csr_op != CSR_NONE -----------------
     csr_op_e                csr_op;
     logic                   csr_imm;         // operand is uimm[4:0] (rs1 field), not rs1
     logic [11:0]            csr_addr;
@@ -208,7 +208,7 @@ package s1_pkg;
     // -- system / privileged / Zifencei ---------------------------------------------
     sys_op_e                sys_op;
 
-    // -- bookkeeping, carried through to the completion buffer (SPEC 9.1) -----------
+    // -- bookkeeping ------------------------------------------------------------------
     logic [XLEN-1:0]        pc;
     logic [ILEN-1:0]        instr;
   } decoded_op_t;
@@ -264,7 +264,7 @@ package s1_pkg;
     logic       align_natural;  // 1 = misaligned access faults
   } pma_t;
 
-  // Execute stage (rtl/core/s1_execute.sv).  Contract: docs/modules/s1_execute.md.
+  // Execute stage (rtl/modules/s1_ex.sv).  Contract: docs/modules/s1_ex.md.
   // ---------------------------------------------------------------------------
 
   // Forwarding source of an EX operand, chosen by the hazard unit in ID.
@@ -328,6 +328,8 @@ package s1_pkg;
     sys_op_e               sys_op;
     logic [REG_ADDR_W-1:0] rs1_addr;    // RVFI; 0 when the operand is not read
     logic [REG_ADDR_W-1:0] rs2_addr;
+    logic [XLEN-1:0]       rs1_rdata;   // RVFI: the operand values EX used
+    logic [XLEN-1:0]       rs2_rdata;
   } ex_mem_t;
 
   // EX -> MUL/DIV dispatch.
@@ -384,7 +386,7 @@ package s1_pkg;
   } fetch_rsp_t;
 
   // ---------------------------------------------------------------------------
-  // Memory stage (rtl/core/s1_mem_stage.sv).  Contract: docs/modules/s1_mem_stage.md.
+  // Memory stage (rtl/modules/s1_mem.sv).  Contract: docs/modules/s1_mem.md.
   // ---------------------------------------------------------------------------
 
   // MEM/WB: one completion per instruction.  The mem_* group is RVFI's: the
@@ -417,6 +419,8 @@ package s1_pkg;
     sys_op_e               sys_op;
     logic [REG_ADDR_W-1:0] rs1_addr;    // RVFI; 0 when the operand is not read
     logic [REG_ADDR_W-1:0] rs2_addr;
+    logic [XLEN-1:0]       rs1_rdata;
+    logic [XLEN-1:0]       rs2_rdata;
   } mem_wb_t;
 
   // ---------------------------------------------------------------------------
@@ -436,23 +440,17 @@ package s1_pkg;
   // ===========================================================================
   // INTEGRATION ADDITIONS
   //
-  // Types for the modules that close the pipeline: the register file, the ID
-  // glue (hazard + CB allocation), the completion buffer and its retire logic,
-  // the CSR file, and the in-EX multiply/divide helper.
+  // Types for the modules that close the pipeline: the register file, WB (the
+  // commit point) and the trace port.  The CSR file is not part of this core:
+  // it connects to s1_core's csr_*/trap ports, and its own constants (CSR
+  // addresses, misa, counter events, interrupt codes) belong to it, not here.
   // ===========================================================================
-
-  // ---------------------------------------------------------------------------
-  // RV64M timing.  MUL and DIV run inside EX and stall it; there is no second
-  // completion path, so these are latencies, not channel counts.
-  // ---------------------------------------------------------------------------
-  parameter int unsigned MUL_LAT  = 3;      // cycles, non-pipelined here
 
   // ---------------------------------------------------------------------------
   // Retire -> fetch / CSR / regfile.  The architectural commit point (SPEC 9.2).
   // ---------------------------------------------------------------------------
 
-  // Why the pipeline was flushed.  The CB drives at most one of these per
-  // cycle; fetch only needs the redirect, the CSR file needs the cause.
+  // Why WB flushed the pipeline.  At most one per cycle.
   typedef enum logic [2:0] {
     FLUSH_NONE,
     FLUSH_TRAP,       // exception or interrupt: pc <- tvec
@@ -461,7 +459,8 @@ package s1_pkg;
     FLUSH_SFENCE      // SFENCE.VMA: refetch (no MMU in v1, so refetch is all)
   } flush_cause_e;
 
-  // The trap the CB asks the CSR file to take.  `interrupt` picks the mcause
+  // The trap WB asks the (external) CSR file to take: s1_core's trap_req_o.
+  // `is_irq` picks the mcause
   // high bit; `exccode` is the low field for both kinds.
   typedef struct packed {
     logic                  valid;
@@ -502,76 +501,5 @@ package s1_pkg;
     logic [XLEN-1:0]       pc_wdata;
     rvfi_mem_t             mem;
   } rvfi_t;
-
-  // ---------------------------------------------------------------------------
-  // CSR file
-  // ---------------------------------------------------------------------------
-
-  // Interrupt inputs (INTERFACES.md I7).  CLINT drives the timer and software
-  // lines, the PLIC the external one.
-  typedef struct packed {
-    logic                  m_timer;
-    logic                  m_soft;
-    logic                  m_ext;
-  } irq_t;
-
-  // mcause interrupt codes
-  parameter logic [5:0] IRQ_M_SOFT  = 6'd3;
-  parameter logic [5:0] IRQ_M_TIMER = 6'd7;
-  parameter logic [5:0] IRQ_M_EXT   = 6'd11;
-
-  // Counter-event selectors for mhpmevent3-15 (SPEC 12).  Event 0 is "never",
-  // so a counter with an unwritten selector does not count.
-  parameter int unsigned HPM_N      = 13;    // mhpmcounter3 .. mhpmcounter15
-  parameter int unsigned PERF_N     = 8;     // event lines the core exports
-
-  parameter logic [5:0] EV_NONE           = 6'd0;
-  parameter logic [5:0] EV_BR_TAKEN       = 6'd1;
-  parameter logic [5:0] EV_BR_MISPREDICT  = 6'd2;
-  parameter logic [5:0] EV_LOAD_RETIRED   = 6'd3;
-  parameter logic [5:0] EV_STORE_RETIRED  = 6'd4;
-  parameter logic [5:0] EV_SB_FULL        = 6'd5;
-  parameter logic [5:0] EV_MULDIV_STALL   = 6'd6;   // EX held by MUL or DIV
-  parameter logic [5:0] EV_LOAD_USE       = 6'd7;   // load-use interlock
-  parameter logic [5:0] EV_HAZARD_STALL  = 6'd8;
-
-  // CSR addresses the core implements.  Grouped as SPEC 10.2's three classes.
-  parameter logic [11:0] CSR_MVENDORID    = 12'hF11;
-  parameter logic [11:0] CSR_MARCHID      = 12'hF12;
-  parameter logic [11:0] CSR_MIMPID       = 12'hF13;
-  parameter logic [11:0] CSR_MHARTID      = 12'hF14;
-
-  parameter logic [11:0] CSR_MSTATUS      = 12'h300;
-  parameter logic [11:0] CSR_MISA         = 12'h301;
-  parameter logic [11:0] CSR_MEDELEG      = 12'h302;
-  parameter logic [11:0] CSR_MIDELEG      = 12'h303;
-  parameter logic [11:0] CSR_MIE          = 12'h304;
-  parameter logic [11:0] CSR_MTVEC        = 12'h305;
-  parameter logic [11:0] CSR_MCOUNTEREN   = 12'h306;
-  parameter logic [11:0] CSR_MCOUNTINHIBIT= 12'h320;
-  parameter logic [11:0] CSR_MSCRATCH     = 12'h340;
-  parameter logic [11:0] CSR_MEPC         = 12'h341;
-  parameter logic [11:0] CSR_MCAUSE       = 12'h342;
-  parameter logic [11:0] CSR_MTVAL        = 12'h343;
-  parameter logic [11:0] CSR_MIP          = 12'h344;
-
-  parameter logic [11:0] CSR_SATP         = 12'h180;   // writable, translation bypassed
-
-  parameter logic [11:0] CSR_PMPCFG0      = 12'h3A0;   // RV64: even indices only
-  parameter logic [11:0] CSR_PMPADDR0     = 12'h3B0;
-
-  parameter logic [11:0] CSR_MCYCLE       = 12'hB00;
-  parameter logic [11:0] CSR_MINSTRET     = 12'hB02;
-  parameter logic [11:0] CSR_MHPMCOUNTER3 = 12'hB03;
-  parameter logic [11:0] CSR_MHPMEVENT3   = 12'h323;
-
-  parameter logic [11:0] CSR_CYCLE        = 12'hC00;   // U-mode read-only shadows
-  parameter logic [11:0] CSR_INSTRET      = 12'hC02;
-
-  // misa: RV64 IMAC + Zicsr/Zifencei (no separate bit).  S is 0 until
-  // translation works -- SCOPE_CONTRACT.md section 4.
-  parameter logic [XLEN-1:0] MISA_VALUE =
-      {2'b10, 36'b0, 26'b00_0000_0000_0001_0001_0000_0101};   // MXL=64: A(0) C(2) I(8) M(12)
-
 
 endpackage
